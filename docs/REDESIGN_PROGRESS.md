@@ -13,3 +13,8 @@
 - 新增 FloatingNavigation，三项纯文字、移动选中背景、静态阴影、96dp 加系统导航 inset。Scaffold 将底部空间传给所有页面。Tab 改为交叉淡入淡出。
 - 改动：MainActivity.kt、ui/components/FloatingNavigation.kt。assembleDebug 通过，浅深预览齐全。
 - 偏差：手势/三键导航尚未真机验证；触感采用 ContextClick 并忽略不支持情况。
+
+## 阶段 3：今日页
+- 单一时间线、就地高亮当前或下一节，已结束课程用 mut，次日预览不重复首课，首次使用提供导入和添加。当前状态/倒计时为独立纯函数；前台分钟对齐刷新。
+- 改动：MainActivity.kt、ui/today/TimelineState.kt、ui/TimelineStateTest.kt。assembleDebug 与 17 项测试通过。
+- 偏差：页面仍是 Column，性能优化留待阶段 7；进度随分钟更新也使用进入动画时长，尚未真机对比。预览覆盖浅/深空状态。
