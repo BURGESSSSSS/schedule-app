@@ -35,3 +35,9 @@
 - 更多页分组列表、主题选择、复制开发者邮箱、动态版本 footer。日志完整内容改为版本折叠卡片；取件码保留查件、WebView、登出、导出，新增手动添加、待取/已取分组、左滑标记与 5 秒撤销。提醒换统一容器，保留开关/权限/测试功能。
 - 改动：MainActivity.kt、ui/components/SubPageScaffold.kt。assembleDebug 与 18 项测试通过。
 - 偏差：提醒暂为底部容器，提前分钟数在阶段 7 接入；仍有部分旧页面硬编码间距和非 Material 图标，主题持久化仍受 DataStore 下载阻断影响。取件码 WebView 保留原生浏览内容，不对外部页面重新配色。
+
+## 阶段 7 与正式打包交接
+- 已接入：5/10/15/30 分钟提醒、单色通知/主题图标、JSON SAF 备份导入导出（事务合并）、课程冲突提示、截图导入方式面板、周编辑底部操作栏及清空撤销。移除已替换的旧页面组件和残留弹窗阴影。
+- 最近 Debug 编译和 18 项单元测试通过；Pixel_9 模拟器已安装启动，无 crash buffer 记录。
+- 未完成：Glance 小组件、Baseline Profile、全量 Material Symbols 与 Inter/DataStore、全部 UI token 清理、200% 字体及全部转场逐帧验收。用户因额度要求停止增强，优先交付正式 Release APK。
+- 注意：这不是七阶段完整验收结论；正式打包仅表明 release 配置编译签名通过。

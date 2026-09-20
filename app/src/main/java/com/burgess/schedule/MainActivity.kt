@@ -368,6 +368,7 @@ private fun ScheduleApp(
     val pickupDao = remember { CourseDatabase.getInstance(context).pickupCodeDao() }
     val pickupCodes by pickupDao.observeAll().collectAsState(initial = emptyList())
     val pendingPickups = pickupCodes.filter { !it.picked }
+    var importOptionsVisible by remember { mutableStateOf(false) }
     var importWeekNumber by remember { mutableStateOf(0) }
     var editorWeekNumber by remember { mutableStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -417,7 +418,7 @@ private fun ScheduleApp(
 
     fun openImport(targetWeekNumber: Int) {
         importWeekNumber = targetWeekNumber
-        imagePickerLauncher.launch("image/*")
+        importOptionsVisible = true
     }
 
     fun openPickupPage(targetUrl: String = CAINIAO_PACKAGE_PAGE_URL) {
@@ -544,6 +545,36 @@ private fun ScheduleApp(
         editorVisible = false
     }
 
+    val copyNextWeek: (Int, List<Course>) -> Unit = { sourceWeekNumber, source ->
+                                val targetWeekNumber = sourceWeekNumber + 1
+                                val existingKeys = courses
+                                    .filter { it.weekNumber == targetWeekNumber }
+                                    .mapTo(mutableSetOf()) { courseKey(it) }
+                                val copies = source.filter { course ->
+                                    val key = courseKey(course)
+                                    existingKeys.add(key)
+                                }
+                                val skipped = source.size - copies.size
+                                if (source.isEmpty()) {
+                                    scope.launch { snackbarHostState.showSnackbar("本周没有可复制的课程") }
+                                } else {
+                                    scope.launch {
+                                        courseDao.insertAll(
+                                            copies.mapIndexed { index, course ->
+                                                course.copy(
+                                                    id = System.nanoTime() + index,
+                                                    weekNumber = targetWeekNumber
+                                                ).toEntity()
+                                            }
+                                        )
+                                        snackbarHostState.showSnackbar(
+                                            "已复制 ${copies.size} 门课程" +
+                                                if (skipped > 0) "，跳过 $skipped 门重复课程" else ""
+                                        )
+                                    }
+                                }
+                            }
+
     CourseTransitionHost(
         detail = expandedCourse?.let { CourseDetail(it.id, it.name, periodTimeRange(it), "周${weekDayLabels[it.dayIndex]} · ${periodRangeLabel(it)}", it.room, courseAccentFor(it)) },
         onDismiss = { expandedCourse = null },
@@ -562,6 +593,20 @@ private fun ScheduleApp(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
+            if (selectedPage == 1 && weekEditing) {
+                Row(Modifier.fillMaxWidth().navigationBarsPadding().heightIn(min = AppSpace.navSpace).background(CardColor).horizontalScroll(rememberScrollState()).padding(horizontal = AppSpace.weekPage), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AppSpace.gridGap)) {
+                    com.burgess.schedule.ui.components.PillButton("复制到下周", { copyNextWeek(selectedWeekNumber, courses.filter { it.weekNumber == selectedWeekNumber }) }, com.burgess.schedule.ui.components.PillStyle.Ghost, true)
+                    com.burgess.schedule.ui.components.PillButton("清空本周", {
+                        val removed = courses.filter { it.weekNumber == selectedWeekNumber }
+                        scope.launch {
+                            courseDao.clearWeek(selectedWeekNumber)
+                            val result = withTimeoutOrNull(5_000L) { snackbarHostState.showSnackbar("已清空本周", "撤销", duration = SnackbarDuration.Indefinite) }
+                            if (result == SnackbarResult.ActionPerformed) courseDao.insertAll(removed.map { it.toEntity() })
+                        }
+                    }, com.burgess.schedule.ui.components.PillStyle.Ghost, true, danger = true)
+                    com.burgess.schedule.ui.components.PillButton("添加课程", { openEditor(weekNumber = selectedWeekNumber) }, small = true)
+                }
+            } else {
             AppBottomNavigation(
                 selectedPage = selectedPage,
                 onPageSelected = {
@@ -573,6 +618,7 @@ private fun ScheduleApp(
                     selectedPage = it
                 }
             )
+            }
         },
 
     ) { innerPadding ->
@@ -622,35 +668,7 @@ private fun ScheduleApp(
                                 )
                             },
                             onEditCourse = { course -> openEditor(course = course) },
-                            onCopyNextWeek = { sourceWeekNumber, source ->
-                                val targetWeekNumber = sourceWeekNumber + 1
-                                val existingKeys = courses
-                                    .filter { it.weekNumber == targetWeekNumber }
-                                    .mapTo(mutableSetOf()) { courseKey(it) }
-                                val copies = source.filter { course ->
-                                    val key = courseKey(course)
-                                    existingKeys.add(key)
-                                }
-                                val skipped = source.size - copies.size
-                                if (source.isEmpty()) {
-                                    scope.launch { snackbarHostState.showSnackbar("本周没有可复制的课程") }
-                                } else {
-                                    scope.launch {
-                                        courseDao.insertAll(
-                                            copies.mapIndexed { index, course ->
-                                                course.copy(
-                                                    id = System.nanoTime() + index,
-                                                    weekNumber = targetWeekNumber
-                                                ).toEntity()
-                                            }
-                                        )
-                                        snackbarHostState.showSnackbar(
-                                            "已复制 ${copies.size} 门课程" +
-                                                if (skipped > 0) "，跳过 $skipped 门重复课程" else ""
-                                        )
-                                    }
-                                }
-                            },
+                            onCopyNextWeek = copyNextWeek,
                             onCourseClick = { expandedCourse = it }
                         )
                         else -> MoreScreen(
@@ -739,6 +757,12 @@ private fun ScheduleApp(
 
     }
 
+    if (importOptionsVisible) BottomSheetContainer({ importOptionsVisible = false }) {
+        Text("导入课程", style = AppType.sheetTitle, color = Ink)
+        ListRow("从课表截图导入", "选择图片，识别后检查并保存", { importOptionsVisible = false; imagePickerLauncher.launch("image/*") })
+        SectionLabel("也可从企业微信等应用分享课表截图到课程表。")
+    }
+
     if (designVisible && BuildConfig.DEBUG) {
         Dialog(onDismissRequest = { designVisible = false }) { com.burgess.schedule.ui.components.DesignPreview() }
     }
@@ -750,6 +774,7 @@ private fun ScheduleApp(
             initialPeriod = editorPeriod,
             initialEndPeriod = editorEndPeriod,
             initialWeekNumber = editorWeekNumber,
+            allCourses = courses,
             onDismissed = { clearEditorState() },
             onSave = { savedCourse ->
                 scope.launch {
@@ -1113,7 +1138,7 @@ private fun QuickPickupCodeOverlay(
                 },
             shape = RoundedCornerShape(24.dp),
             color = CardColor,
-            tonalElevation = 8.dp
+            tonalElevation = 0.dp
         ) {
             Column(modifier = Modifier.padding(24.dp)) {
                 Text(
@@ -1213,33 +1238,6 @@ private fun isTrackingNumberCandidate(value: String): Boolean =
 private fun formatPickupTime(timestamp: Long): String =
     SimpleDateFormat("M月d日 HH:mm", Locale.CHINA).format(Date(timestamp))
 
-@Composable
-private fun StaggeredReveal(
-    index: Int,
-    initialScale: Float = 0.985f,
-    content: @Composable () -> Unit
-) {
-    val visibilityState = remember { MutableTransitionState(false) }
-    LaunchedEffect(Unit) {
-        delay((index * 60L).coerceAtMost(360L))
-        visibilityState.targetState = true
-    }
-    AnimatedVisibility(
-        visibleState = visibilityState,
-        enter = fadeIn(tween(300)) +
-            slideInVertically(
-                animationSpec = spring(dampingRatio = 0.85f, stiffness = 500f),
-                initialOffsetY = { -it / 12 }
-            ) +
-            scaleIn(
-                animationSpec = spring(dampingRatio = 0.85f, stiffness = 500f),
-                initialScale = initialScale
-            ),
-        exit = fadeOut(tween(140))
-    ) {
-        content()
-    }
-}
 
 private data class DevLogSection(
     val title: String,
@@ -1473,12 +1471,12 @@ private fun DevLogScreen(onBack: () -> Unit) {
 @Composable
 private fun rememberPressScale(
     interactionSource: MutableInteractionSource,
-    pressedScale: Float = 0.97f
+    pressedScale: Float = Motion.PressScale
 ): Float {
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (pressed) pressedScale else 1f,
-        animationSpec = spring(dampingRatio = 0.6f, stiffness = 700f),
+        animationSpec = tween(Motion.PressMs),
         label = "press scale"
     )
     return scale
@@ -1506,6 +1504,7 @@ private fun MoreScreen(today: Calendar, onReminderClick: () -> Unit, onPickupCli
             SectionLabel("外观")
             ListGroup { ListRow("主题", theme, { themeVisible = true }) }
             Spacer(Modifier.height(AppSpace.gap))
+            com.burgess.schedule.backup.BackupActions { snack.showSnackbar(it) }
             SectionLabel("关于")
             ListGroup {
                 ListRow("开发日志", "查看更新记录", onDevLogClick)
@@ -1531,43 +1530,6 @@ private fun MoreScreen(today: Calendar, onReminderClick: () -> Unit, onPickupCli
 @Preview @Composable private fun MoreLight() { 课程表Theme(false) { MoreScreen(Calendar.getInstance(), {}, {}, {}, {}) } }
 @Preview @Composable private fun MoreDark() { 课程表Theme(true) { MoreScreen(Calendar.getInstance(), {}, {}, {}, {}) } }
 
-@Composable
-private fun MoreActionRow(
-    title: String,
-    subtitle: String,
-    onClick: () -> Unit
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressScale = rememberPressScale(interactionSource)
-    AppCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
-            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Ink
-                )
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MutedInk
-                )
-            }
-            Text(
-                text = "›",
-                style = MaterialTheme.typography.titleMedium,
-                color = FaintInk
-            )
-        }
-    }
-}
 
 private fun Course.timedLesson(): TimedLesson {
     val date = SchoolSchedule.firstWeekStart().apply { add(Calendar.WEEK_OF_YEAR, weekNumber - 1); add(Calendar.DAY_OF_YEAR, dayIndex) }
@@ -1792,7 +1754,7 @@ private fun AnimatedScheduleDialog(
                     color = MaterialTheme.colorScheme.surface,
                     contentColor = MaterialTheme.colorScheme.onSurface,
                     tonalElevation = 0.dp,
-                    shadowElevation = 18.dp
+                    shadowElevation = 0.dp
                 ) {
                     Column(modifier = Modifier.padding(22.dp)) {
                         content(::requestDismiss)
@@ -1931,55 +1893,6 @@ private fun OcrPreviewDialog(
     }
 }
 
-@Composable
-private fun ScheduleHeader(
-    title: String = "课程表",
-    today: Calendar,
-    onImportClick: () -> Unit = {},
-    onReminderClick: () -> Unit = {},
-    showActions: Boolean = true,
-    showReminder: Boolean = true,
-    showEdit: Boolean = false,
-    editing: Boolean = false,
-    onEditClick: () -> Unit = {}
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.headlineLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = Ink
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = formatToday(today),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MutedInk
-            )
-        }
-        if (showActions) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (showReminder) {
-                    PillButton(text = "提醒", filled = false, onClick = onReminderClick)
-                }
-                if (showEdit) {
-                    PillButton(
-                        text = if (editing) "完成" else "编辑",
-                        filled = editing,
-                        onClick = onEditClick
-                    )
-                }
-                PillButton(text = "导入", filled = false, onClick = onImportClick)
-            }
-        }
-    }
-}
 
 @Composable
 private fun PillButton(text: String, filled: Boolean, onClick: () -> Unit) {
@@ -2040,6 +1953,8 @@ private fun ReminderDialog(
     onRequestExactAlarm: () -> Unit,
     onSendTest: () -> Unit
 ) {
+    val context = LocalContext.current
+    var lead by remember { mutableStateOf(ReminderScheduler.leadMinutes(context)) }
     BottomSheetContainer(onDismiss) {
         Text("课程提醒", style = AppType.title, color = Ink)
         if (!status.notificationPermissionGranted || !status.notificationsEnabled) {
@@ -2047,8 +1962,14 @@ private fun ReminderDialog(
             com.burgess.schedule.ui.components.PillButton("去开启", onRequestPermission)
         }
         ListGroup {
-            ListRow("开启提醒", if (status.remindersEnabled) "上课前 20 分钟提醒" else "提醒已关闭", trailing = { AppSwitch(status.remindersEnabled, onToggle) })
+            ListRow("开启提醒", if (status.remindersEnabled) "上课前 $lead 分钟提醒" else "提醒已关闭", trailing = { AppSwitch(status.remindersEnabled, onToggle) })
             HorizontalDivider(color = Hairline)
+            SectionLabel("提前提醒时间")
+            Row(Modifier.horizontalScroll(rememberScrollState())) {
+                listOf(5, 10, 15, 30).forEach { minutes ->
+                    com.burgess.schedule.ui.components.PillButton("$minutes 分", { lead = minutes; ReminderScheduler.setLeadMinutes(context, minutes) }, if (lead == minutes) com.burgess.schedule.ui.components.PillStyle.Primary else com.burgess.schedule.ui.components.PillStyle.Ghost, true)
+                }
+            }
             ListRow("发送测试通知", "检查通知是否正常显示", onSendTest)
             if (!status.exactAlarmAllowed) {
                 HorizontalDivider(color = Hairline)
@@ -2060,124 +1981,7 @@ private fun ReminderDialog(
 @Preview @Composable private fun ReminderLight() { 课程表Theme(false) { ReminderDialog(ReminderStatus(true, false, false, false), {}, {}, {}, {}, {}) } }
 @Preview @Composable private fun ReminderDark() { 课程表Theme(true) { ReminderDialog(ReminderStatus(true, true, true, true), {}, {}, {}, {}, {}) } }
 
-@Composable
-private fun WeekNavigator(
-    weekStart: Calendar,
-    weekOffset: Int,
-    onPrevious: () -> Unit,
-    onToday: () -> Unit,
-    onNext: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        CompactActionButton(text = "‹", onClick = onPrevious)
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = scheduleWeekLabel(weekStart),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                text = formatDateRange(weekStart),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            if (weekOffset != 0) {
-                CompactActionButton(text = "本周", onClick = onToday)
-            }
-            CompactActionButton(text = "›", onClick = onNext)
-        }
-    }
-}
 
-@Composable
-private fun NextCourseCard(
-    focus: FocusCourse,
-    today: Calendar,
-    onClick: () -> Unit
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressScale = rememberPressScale(interactionSource)
-    val shape = RoundedCornerShape(16.dp)
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
-            .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
-            .clip(shape)
-            .background(CardColor)
-            .border(1.dp, Hairline, shape)
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
-                onClick = onClick
-            )
-            .padding(horizontal = 16.dp, vertical = 14.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .width(7.dp)
-                            .height(7.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Accent)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (focus.isInProgress) "正在进行" else "下一节",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = AccentDeep
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = focusDateLabel(focus, today),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MutedInk
-                    )
-                }
-                Spacer(modifier = Modifier.height(7.dp))
-                Text(
-                    text = focus.course.name,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Ink
-                )
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = periodRangeLabel(focus.course) + " · " + periodTimeRange(focus.course),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Ink
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = displayLocation(focus.course.room).ifBlank { "地点待确认" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = Ink
-                )
-            }
-            Text(
-                text = "›",
-                fontSize = 24.sp,
-                color = AccentDeep
-            )
-        }
-    }
-}
 
 @Composable
 private fun ScheduleGrid(today: Calendar, courses: List<Course>, focus: FocusCourse?, selectedWeekOffset: Int, editMode: Boolean, rowHeight: Dp, onAddCourse: (Int, Int) -> Unit, onEditCourse: (Course) -> Unit, onCourseClick: (Course) -> Unit) {
@@ -2281,6 +2085,7 @@ private fun CourseEditorDialog(
     initialPeriod: Int,
     initialEndPeriod: Int,
     initialWeekNumber: Int,
+    allCourses: List<Course> = emptyList(),
     onDismissed: () -> Unit,
     onSave: (Course) -> Unit,
     onDelete: (Course) -> Unit
@@ -2314,6 +2119,7 @@ private fun CourseEditorDialog(
     var endPeriodMenuExpanded by remember { mutableStateOf(false) }
     var nameTouched by remember(course?.id, initialDay, initialPeriod) { mutableStateOf(false) }
     val nameError = nameTouched && name.isBlank()
+    val conflicts = allCourses.filter { it.id != course?.id && hasTimeConflict(selectedDay, selectedPeriod, selectedEndPeriod, course?.weekNumber ?: initialWeekNumber, it.dayIndex, it.period, it.endPeriod, it.weekNumber) }
     val fieldColors = scheduleOutlinedFieldColors()
 
     AnimatedScheduleDialog(onDismissed = onDismissed) { requestDismiss ->
@@ -2458,6 +2264,7 @@ private fun CourseEditorDialog(
             )
         }
         Spacer(modifier = Modifier.height(14.dp))
+        if (conflicts.isNotEmpty()) SectionLabel("与《${conflicts.first().name}》时间冲突，仍可保存。")
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Spacer(modifier = Modifier.height(10.dp))
         Row(

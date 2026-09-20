@@ -16,6 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.burgess.schedule.MainActivity
+import com.burgess.schedule.R
 import com.burgess.schedule.data.CourseDatabase
 import com.burgess.schedule.data.CourseEntity
 import com.burgess.schedule.data.SchoolSchedule
@@ -71,6 +72,14 @@ object ReminderScheduler {
         return preferences(context).getBoolean(KEY_REMINDERS_ENABLED, true)
     }
 
+    fun leadMinutes(context: Context): Int = preferences(context).getInt("lead_minutes", DEFAULT_LEAD_MINUTES)
+
+    fun setLeadMinutes(context: Context, minutes: Int) {
+        require(minutes in listOf(5, 10, 15, 30))
+        preferences(context).edit().putInt("lead_minutes", minutes).apply()
+        rescheduleFromDatabase(context)
+    }
+
     fun getStatus(context: Context): ReminderStatus {
         val appContext = context.applicationContext
         return ReminderStatus(
@@ -98,7 +107,7 @@ object ReminderScheduler {
     fun scheduleAll(
         context: Context,
         courses: List<CourseEntity>,
-        leadMinutes: Int = DEFAULT_LEAD_MINUTES
+        leadMinutes: Int = leadMinutes(context)
     ) {
         val appContext = context.applicationContext
         ensureChannel(appContext)
@@ -129,7 +138,7 @@ object ReminderScheduler {
     fun scheduleCourse(
         context: Context,
         course: CourseEntity,
-        leadMinutes: Int = DEFAULT_LEAD_MINUTES
+        leadMinutes: Int = leadMinutes(context)
     ) {
         val appContext = context.applicationContext
         if (!areRemindersEnabled(appContext) || !isSchedulable(course)) return
@@ -229,7 +238,7 @@ object ReminderScheduler {
         }
 
         val notification = NotificationCompat.Builder(appContext, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.drawable.ic_schedule_monochrome)
             .setContentTitle("课程提醒测试")
             .setContentText("通知功能已正常工作")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
@@ -287,10 +296,9 @@ object ReminderScheduler {
         )
         val location = room.ifBlank { "教室待填写" }
         val notification = NotificationCompat.Builder(appContext, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("下一节课：$name")
-            .setContentText("${periodLabel(period)} · $location")
-            .setStyle(NotificationCompat.BigTextStyle().bigText("${periodLabel(period)} · $location"))
+            .setSmallIcon(R.drawable.ic_schedule_monochrome)
+            .setContentTitle(name)
+            .setContentText("${periodLabel(period)} · $location · ${"%02d:%02d".format(SchoolSchedule.periods[period].startMinutes / 60, SchoolSchedule.periods[period].startMinutes % 60)} 开始")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setContentIntent(openPendingIntent)
             .setAutoCancel(true)

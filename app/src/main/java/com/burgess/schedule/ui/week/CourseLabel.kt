@@ -4,3 +4,5 @@ fun shortName(name: String): String {
     return name.replace(Regex("[（(].*?[）)]"), "").trim().take(4)
 }
 fun roomNumber(room: String): String = Regex("[A-Za-z]?[-]?[0-9]{2,}[A-Za-z]?").findAll(room).lastOrNull()?.value ?: room
+
+fun hasTimeConflict(day: Int, start: Int, end: Int, week: Int, otherDay: Int, otherStart: Int, otherEnd: Int, otherWeek: Int): Boolean = day == otherDay && (week == otherWeek || week == 0 || otherWeek == 0) && start <= otherEnd && end >= otherStart
