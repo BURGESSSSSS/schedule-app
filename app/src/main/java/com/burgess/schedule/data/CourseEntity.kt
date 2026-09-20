@@ -14,5 +14,6 @@ data class CourseEntity(
     val period: Int,
     @ColumnInfo(defaultValue = "0") val endPeriod: Int,
     @ColumnInfo(defaultValue = "0") val weekNumber: Int,
-    val colorValue: Int
+    val colorValue: Int,
+    val shortName: String? = null
 )

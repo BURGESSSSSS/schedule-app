@@ -18,3 +18,9 @@
 - 单一时间线、就地高亮当前或下一节，已结束课程用 mut，次日预览不重复首课，首次使用提供导入和添加。当前状态/倒计时为独立纯函数；前台分钟对齐刷新。
 - 改动：MainActivity.kt、ui/today/TimelineState.kt、ui/TimelineStateTest.kt。assembleDebug 与 17 项测试通过。
 - 偏差：页面仍是 Column，性能优化留待阶段 7；进度随分钟更新也使用进入动画时长，尚未真机对比。预览覆盖浅/深空状态。
+
+## 阶段 4：周视图
+- 固定五列、按需周末列、横向端点吸附与跳转芯片、固定时间轴、日期圆圈、课程简称与可访问描述；保留编辑/导入/复制回调。
+- 数据库先导出 v5，再生成 v6 与 5→6 AutoMigration，原四条迁移保留。编辑可选简称并实时预览。
+- 改动：MainActivity.kt、CourseEntity.kt、CourseDatabase.kt、app/build.gradle.kts、schemas/{5,6}.json、ui/week/CourseLabel.kt、CourseLabelTest.kt。编译及既有 17 测试通过，简称测试随下一轮运行。
+- 偏差：拉丁简称按长度判定字号，未使用实际测量；无设备，布局验收以源码与预览定义为限。

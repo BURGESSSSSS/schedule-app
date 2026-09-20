@@ -136,3 +136,5 @@ tasks.register<Test>("verifyDebugUnitTests") {
     )
     useJUnit()
 }
+
+ksp { arg("room.schemaLocation", "$projectDir/schemas") }

@@ -34,6 +34,11 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import com.burgess.schedule.ui.week.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -155,7 +160,8 @@ private data class Course(
     val period: Int,
     val color: Color,
     val endPeriod: Int = period,
-    val weekNumber: Int = 0
+    val weekNumber: Int = 0,
+    val shortName: String? = null
 )
 
 private data class FocusCourse(
@@ -237,6 +243,7 @@ private fun CourseEntity.toCourse(): Course {
         period = safePeriod,
         endPeriod = safeEndPeriod,
         weekNumber = weekNumber,
+        shortName = shortName,
         color = colorValue.takeIf { it != 0 }?.let { Color(it) } ?: courseAccentFor(id)
     )
 }
@@ -253,7 +260,8 @@ private fun Course.toEntity(): CourseEntity {
         period = safePeriod,
         endPeriod = safeEndPeriod,
         weekNumber = weekNumber,
-        colorValue = color.toArgb()
+        colorValue = color.toArgb(),
+        shortName = shortName
     )
 }
 
@@ -1897,114 +1905,25 @@ private fun WeekScreen(
     onCopyNextWeek: (Int, List<Course>) -> Unit,
     onCourseClick: (Course) -> Unit
 ) {
-    val scrollState = rememberScrollState()
-    val weekSnapshot = remember(weekOffset, selectedWeekStart.timeInMillis, courses) {
-        WeekSnapshot(
-            weekOffset = weekOffset,
-            weekStartMillis = selectedWeekStart.timeInMillis,
-            weekNumber = scheduleWeekNumber(selectedWeekStart),
-            courses = courses.toList()
-        )
-    }
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val rowHeight = ((maxHeight - 230.dp) / periods.size).coerceIn(54.dp, 76.dp)
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(scrollState)
-        ) {
-            StaggeredReveal(0) {
-                ScheduleHeader(
-                    title = "周视图",
-                    today = today,
-                    onImportClick = { onImportClick(weekSnapshot.weekNumber) },
-                    onReminderClick = onReminderClick,
-                    showReminder = false,
-                    showEdit = true,
-                    editing = editing,
-                    onEditClick = onToggleEditing
-                )
+    val weekNumber = scheduleWeekNumber(selectedWeekStart)
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = AppSpace.weekPage, vertical = AppSpace.page), verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Column(Modifier.weight(1f)) {
+                Text("第 $weekNumber 周", style = AppType.title, color = Ink)
+                SectionLabel(formatDateRange(selectedWeekStart))
             }
-            StaggeredReveal(2, initialScale = 1f) {
-                AnimatedContent(
-                    targetState = weekSnapshot,
-                    transitionSpec = {
-                        val direction = if (targetState.weekOffset >= initialState.weekOffset) 1 else -1
-                        (fadeIn(tween(220)) + slideInHorizontally(
-                            animationSpec = tween(260),
-                            initialOffsetX = { direction * it / 3 }
-                        )) togetherWith
-                            (fadeOut(tween(160)) + slideOutHorizontally(
-                                animationSpec = tween(220),
-                                targetOffsetX = { -direction * it / 3 }
-                            ))
-                    },
-                    label = "week transition"
-                ) { snapshot ->
-                    val snapshotWeekStart = remember(snapshot.weekStartMillis) {
-                        Calendar.getInstance().apply { timeInMillis = snapshot.weekStartMillis }
-                    }
-                    val snapshotFocus = focus?.takeIf { candidate ->
-                        candidate.weekOffset == snapshot.weekOffset &&
-                            snapshot.courses.any { it.id == candidate.course.id }
-                    }
-                    Column {
-                        WeekNavigator(
-                            weekStart = snapshotWeekStart,
-                            weekOffset = snapshot.weekOffset,
-                            onPrevious = onPrevious,
-                            onToday = onToday,
-                            onNext = onNext
-                        )
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 18.dp, vertical = 1.dp),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            CompactActionButton(
-                                text = "复制到下周",
-                                onClick = { onCopyNextWeek(snapshot.weekNumber, snapshot.courses) }
-                            )
-                        }
-                        if (snapshot.courses.isEmpty()) {
-                            AppCard(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 4.dp)
-                            ) {
-                                Text(
-                                    text = "本周还没有课程",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Ink
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = if (editing) "点击下方空白时段添加课程，也可以使用导入。" else "点击右上角编辑，或从课表截图导入本周课程。",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MutedInk
-                                )
-                            }
-                        }
-                        ScheduleGrid(
-                            today = today,
-                            courses = snapshot.courses,
-                            focus = snapshotFocus,
-                            selectedWeekOffset = snapshot.weekOffset,
-                            editMode = editing,
-                            rowHeight = rowHeight,
-                            onAddCourse = { dayIndex, periodIndex ->
-                                onAddCourse(snapshot.weekNumber, dayIndex, periodIndex)
-                            },
-                            onEditCourse = onEditCourse,
-                            onCourseClick = onCourseClick
-                        )
-                    }
-                }
-            }
-            Spacer(modifier = Modifier.height(14.dp))
+            com.burgess.schedule.ui.components.PillButton(if (editing) "完成" else "编辑", onToggleEditing, if (editing) com.burgess.schedule.ui.components.PillStyle.Primary else com.burgess.schedule.ui.components.PillStyle.Secondary, true)
+            com.burgess.schedule.ui.components.PillButton("导入", { onImportClick(weekNumber) }, com.burgess.schedule.ui.components.PillStyle.Secondary, true)
         }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            com.burgess.schedule.ui.components.CircleIconButton("‹", onPrevious)
+            com.burgess.schedule.ui.components.CircleIconButton("›", onNext)
+            if (weekOffset != 0) AppChip("回到本周", onToday)
+            Spacer(Modifier.weight(1f))
+            com.burgess.schedule.ui.components.PillButton("复制到下周", { onCopyNextWeek(weekNumber, courses) }, com.burgess.schedule.ui.components.PillStyle.Ghost, true)
+        }
+        if (courses.isEmpty()) SectionLabel(if (editing) "点击空白时段添加课程。" else "本周还没有课程，点击编辑或导入开始。")
+        ScheduleGrid(today, courses, focus, weekOffset, editing, AppSpace.gridRow, { day, period -> onAddCourse(weekNumber, day, period) }, onEditCourse, onCourseClick)
     }
 }
 
@@ -2661,155 +2580,54 @@ private fun NextCourseCard(
 }
 
 @Composable
-private fun ScheduleGrid(
-    today: Calendar,
-    courses: List<Course>,
-    focus: FocusCourse?,
-    selectedWeekOffset: Int,
-    editMode: Boolean,
-    rowHeight: Dp,
-    onAddCourse: (Int, Int) -> Unit,
-    onEditCourse: (Course) -> Unit,
-    onCourseClick: (Course) -> Unit
-) {
-    val hasWeekendCourses = courses.any { it.dayIndex >= 5 }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-    ) {
-        ScheduleGridSection(
-            today = today,
-            courses = courses,
-            focus = focus,
-            selectedWeekOffset = selectedWeekOffset,
-            editMode = editMode,
-            rowHeight = rowHeight,
-            visibleDays = (0..4).toList(),
-            onAddCourse = onAddCourse,
-            onEditCourse = onEditCourse,
-            onCourseClick = onCourseClick
-        )
-        if (hasWeekendCourses) {
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = "周末课程",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MutedInk,
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-            )
-            ScheduleGridSection(
-                today = today,
-                courses = courses,
-                focus = focus,
-                selectedWeekOffset = selectedWeekOffset,
-                editMode = editMode,
-                rowHeight = rowHeight,
-                visibleDays = listOf(5, 6),
-                onAddCourse = onAddCourse,
-                onEditCourse = onEditCourse,
-                onCourseClick = onCourseClick
-            )
+private fun ScheduleGrid(today: Calendar, courses: List<Course>, focus: FocusCourse?, selectedWeekOffset: Int, editMode: Boolean, rowHeight: Dp, onAddCourse: (Int, Int) -> Unit, onEditCourse: (Course) -> Unit, onCourseClick: (Course) -> Unit) {
+    val hasWeekend = courses.any { it.dayIndex >= 5 }
+    val scroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val fontScale = LocalConfiguration.current.fontScale.coerceAtLeast(1f)
+    val height = AppSpace.gridRow * fontScale
+    val weekStart = mondayOfCurrentWeek(today).apply { add(Calendar.WEEK_OF_YEAR, selectedWeekOffset) }
+    LaunchedEffect(selectedWeekOffset, hasWeekend, scroll.maxValue) {
+        if (scroll.maxValue != Int.MAX_VALUE) scroll.scrollTo(if (hasWeekend && selectedWeekOffset == 0 && currentDayIndex(today) >= 5) scroll.maxValue else 0)
+    }
+    LaunchedEffect(scroll.isScrollInProgress) {
+        if (!scroll.isScrollInProgress && scroll.maxValue > 0 && scroll.maxValue != Int.MAX_VALUE) {
+            val target = if (scroll.value > scroll.maxValue / 2) scroll.maxValue else 0
+            if (scroll.value != target) scroll.animateScrollTo(target, tween(Motion.TabCrossfadeMs))
         }
     }
-}
-
-@Composable
-private fun ScheduleGridSection(
-    today: Calendar,
-    courses: List<Course>,
-    focus: FocusCourse?,
-    selectedWeekOffset: Int,
-    editMode: Boolean,
-    rowHeight: Dp,
-    visibleDays: List<Int>,
-    onAddCourse: (Int, Int) -> Unit,
-    onEditCourse: (Course) -> Unit,
-    onCourseClick: (Course) -> Unit
-) {
-    val timeColumnWidth = 26.dp
-
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 7.dp, vertical = 6.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(Gray100)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp))
-            .padding(horizontal = 4.dp, vertical = 7.dp)
-    ) {
-        val cellWidth = (maxWidth - timeColumnWidth - 8.dp) / visibleDays.count()
-        Column {
-            Row {
-                Box(
-                    modifier = Modifier
-                        .width(timeColumnWidth)
-                        .height(36.dp)
-                )
-                visibleDays.forEach { dayIndex ->
-                    DayHeader(
-                        label = weekDayLabels[dayIndex],
-                        isToday = selectedWeekOffset == 0 && dayIndex == currentDayIndex(today),
-                        modifier = Modifier.width(cellWidth)
-                    )
+    if (hasWeekend) AppChip(if (scroll.value > scroll.maxValue / 2) "‹ 工作日" else "周末 ›") { scope.launch { scroll.animateScrollTo(if (scroll.value > scroll.maxValue / 2) 0 else scroll.maxValue, tween(Motion.TabCrossfadeMs)) } }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val width = (maxWidth - AppSpace.axis - AppSpace.gridGap * 5) / 5
+        Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gridGap)) {
+            Column(Modifier.width(AppSpace.axis), verticalArrangement = Arrangement.spacedBy(AppSpace.gridGap)) {
+                Spacer(Modifier.height(AppSpace.row))
+                periods.indices.step(2).forEach { period ->
+                    Box(Modifier.height(height)) { Text("%02d:%02d".format(periods[period].startMinutes / 60, periods[period].startMinutes % 60), style = AppType.micro, color = MutedInk) }
                 }
             }
-            Row {
-                Column(modifier = Modifier.width(timeColumnWidth)) {
-                    periods.forEach { period ->
-                        Box(
-                            modifier = Modifier
-                                .width(timeColumnWidth)
-                                .height(rowHeight),
-                            contentAlignment = Alignment.TopCenter
-                        ) {
-                            Text(
-                                text = period.label.replace("第 ", ""),
-                                modifier = Modifier.padding(top = 8.dp),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+            Row(Modifier.horizontalScroll(scroll, enabled = hasWeekend), horizontalArrangement = Arrangement.spacedBy(AppSpace.gridGap)) {
+                (0 until if (hasWeekend) 7 else 5).forEach { day ->
+                    val date = weekStart.cloneCalendar().apply { add(Calendar.DAY_OF_YEAR, day) }
+                    val isToday = selectedWeekOffset == 0 && currentDayIndex(today) == day
+                    Column(Modifier.width(width), verticalArrangement = Arrangement.spacedBy(AppSpace.gridGap)) {
+                        Column(Modifier.height(AppSpace.row).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("周${weekDayLabels[day]}", style = AppType.caption, color = MutedInk)
+                            Box(Modifier.size(AppSpace.date).background(if (isToday) Ink else Color.Transparent, AppShape.pill), contentAlignment = Alignment.Center) { Text(date.get(Calendar.DAY_OF_MONTH).toString(), style = AppType.caption, color = if (isToday) LocalAppColors.current.onInk else Ink) }
                         }
-                    }
-                }
-                visibleDays.forEach { dayIndex ->
-                    Column(modifier = Modifier.width(cellWidth)) {
-                        var periodIndex = 0
-                        while (periodIndex < periods.size) {
-                            val slotPeriod = periodIndex
-                            val course = courses.firstOrNull {
-                                it.dayIndex == dayIndex && it.period == slotPeriod
-                            }
-                            val nextSlotIsEmpty = slotPeriod % 2 == 0 &&
-                                slotPeriod + 1 < periods.size &&
-                                courses.none { it.dayIndex == dayIndex && it.period == slotPeriod + 1 }
-                            val span = if (course == null) {
-                                if (nextSlotIsEmpty) 2 else 1
-                            } else {
-                                (course.endPeriod - course.period + 1)
-                                    .coerceIn(1, periods.size - periodIndex)
-                            }
-                            val isFocus = focus != null &&
-                                selectedWeekOffset == focus.weekOffset &&
-                                focus.dayIndex == dayIndex &&
-                                focus.course.id == course?.id
-                            CourseSlot(
-                                course = course,
-                                isFocus = isFocus,
-                                isInProgress = isFocus && focus?.isInProgress == true,
-                                editMode = editMode,
-                                width = cellWidth,
-                                height = rowHeight * span,
-                                onClick = {
-                                    if (course != null) {
-                                        if (editMode) onEditCourse(course) else onCourseClick(course)
-                                    } else if (editMode) {
-                                        onAddCourse(dayIndex, (slotPeriod / 2) * 2)
-                                    }
+                        var period = 0
+                        while (period < periods.size) {
+                            val current = period
+                            val course = courses.firstOrNull { it.dayIndex == day && it.period / 2 == current / 2 }
+                            val span = if (course == null) 1 else (course.endPeriod / 2 - current / 2 + 1).coerceAtLeast(1)
+                            val slotHeight = height * span + AppSpace.gridGap * (span - 1)
+                            key(day, current, course?.id) {
+                                CourseSlot(course, focus?.course?.id == course?.id, focus?.isInProgress == true && focus.course.id == course?.id, editMode, width, slotHeight) {
+                                    if (course != null) { if (editMode) onEditCourse(course) else onCourseClick(course) }
+                                    else if (editMode) onAddCourse(day, current)
                                 }
-                            )
-                            periodIndex += span
+                            }
+                            period += span * 2
                         }
                     }
                 }
@@ -2819,141 +2637,25 @@ private fun ScheduleGridSection(
 }
 
 @Composable
-private fun DayHeader(
-    label: String,
-    isToday: Boolean,
-    modifier: Modifier = Modifier
-) {
-    Box(
-        modifier = modifier
-            .height(36.dp)
-            .padding(horizontal = 2.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = "周$label",
-            modifier = Modifier
-                .then(
-                    if (isToday) {
-                        Modifier
-                            .clip(RoundedCornerShape(50))
-                            .background(Ink)
-                    } else {
-                        Modifier
-                    }
-                )
-                .padding(horizontal = 12.dp, vertical = 5.dp),
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = if (isToday) FontWeight.SemiBold else FontWeight.Medium,
-            color = if (isToday) CardColor else MutedInk
-        )
+private fun CourseSlot(course: Course?, isFocus: Boolean, isInProgress: Boolean, editMode: Boolean, width: Dp, height: Dp, onClick: () -> Unit) {
+    val c = LocalAppColors.current
+    val tint = course?.let { courseTint(courseAccentFor(it)) }
+    val interaction = remember { MutableInteractionSource() }
+    val scale = rememberPressScale(interaction, Motion.PressScale)
+    Column(Modifier.width(width).height(height).graphicsLayer { scaleX = scale; scaleY = scale }.clip(AppShape.cell).background(tint?.first ?: c.ink.copy(alpha = .035f)).then(if (isInProgress) Modifier.border(AppSpace.line * 1.5f, c.ink, AppShape.cell) else Modifier).clickable(interaction, null, enabled = course != null || editMode, onClick = onClick).semantics {
+        contentDescription = course?.let { "${it.name}，周${weekDayLabels[it.dayIndex]}，${periodTimeRange(it)}，${it.room.ifBlank { "未填写地点" }}" } ?: if (editMode) "添加课程" else "空闲时段"
+    }.padding(horizontal = AppSpace.cellHorizontal, vertical = AppSpace.cellVertical), verticalArrangement = Arrangement.spacedBy(AppSpace.gridGap)) {
+        if (course != null) {
+            val label = course.shortName?.takeIf { it.isNotBlank() } ?: shortName(course.name)
+            val latin = label.all { it.code < 128 }
+            Text(label, style = if (latin && label.length > 6) AppType.micro else AppType.cell, color = tint!!.second, maxLines = if (latin) 1 else 2, softWrap = !latin, overflow = TextOverflow.Ellipsis)
+            Text(roomNumber(course.room).ifBlank { "未填写" }, style = AppType.micro, color = tint.second, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        } else if (editMode) Text("+", style = AppType.cardTitle, color = c.mut)
     }
 }
 
-@Composable
-private fun CourseSlot(
-    course: Course?,
-    isFocus: Boolean,
-    isInProgress: Boolean,
-    editMode: Boolean,
-    width: Dp,
-    height: Dp,
-    onClick: () -> Unit
-) {
-    val shape = RoundedCornerShape(9.dp)
-    val borderColor = if (isInProgress) AccentDeep else Hairline
-    val borderWidth = if (isInProgress) 1.5.dp else 0.5.dp
-    val titleLines = if (height >= 72.dp) 2 else 1
-    val roomLines = when {
-        height >= 160.dp -> 6
-        height >= 128.dp -> 5
-        height >= 100.dp -> 4
-        height >= 76.dp -> 3
-        else -> 1
-    }
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressScale = rememberPressScale(interactionSource, pressedScale = 0.96f)
-    Box(
-        modifier = Modifier
-            .width(width)
-            .height(height)
-            .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
-            .padding(1.dp)
-            .clip(shape)
-            .background(
-                when {
-                    course != null -> if (isFocus) CourseSlotFill else CourseSlotFill
-                    editMode -> CardColor
-                    else -> Color.Transparent
-                }
-            )
-            .border(
-                width = borderWidth,
-                color = borderColor,
-                shape = shape
-            )
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
-                enabled = course != null || editMode,
-                onClick = onClick
-            )
-            .padding(horizontal = 4.dp, vertical = 4.dp)
-    ) {
-        if (course == null) {
-            if (editMode) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "+",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = FaintInk
-                    )
-                }
-            } else {
-                Spacer(modifier = Modifier.fillMaxSize())
-            }
-        } else {
-            val location = displayLocation(course.room)
-            Column(modifier = Modifier.fillMaxSize()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(0.34f),
-                    contentAlignment = Alignment.TopStart
-                ) {
-                    Text(
-                        text = course.name,
-                        maxLines = titleLines,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 16.sp),
-                        fontWeight = FontWeight.Medium,
-                        color = Ink
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(0.66f),
-                    contentAlignment = Alignment.TopStart
-                ) {
-                    if (location.isNotBlank()) {
-                        Text(
-                            text = location,
-                            maxLines = roomLines,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.bodySmall.copy(lineHeight = 15.sp),
-                            fontWeight = FontWeight.Medium,
-                            color = Ink
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
+@Preview(widthDp = 360) @Composable private fun WeekLightPreview() { 课程表Theme(false) { ScheduleGrid(Calendar.getInstance(), emptyList(), null, 0, false, AppSpace.gridRow, { _, _ -> }, {}, {}) } }
+@Preview(widthDp = 360, fontScale = 1.3f) @Composable private fun WeekDarkPreview() { 课程表Theme(true) { ScheduleGrid(Calendar.getInstance(), emptyList(), null, 0, true, AppSpace.gridRow, { _, _ -> }, {}, {}) } }
 
 @Composable
 private fun scheduleOutlinedFieldColors() = OutlinedTextFieldDefaults.colors(
@@ -2984,6 +2686,7 @@ private fun CourseEditorDialog(
     var name by remember(course?.id, initialDay, initialPeriod) {
         mutableStateOf(course?.name.orEmpty())
     }
+    var customShortName by remember(course?.id) { mutableStateOf(course?.shortName.orEmpty()) }
     var teacher by remember(course?.id, initialDay, initialPeriod) {
         mutableStateOf(course?.teacher.orEmpty())
     }
@@ -3052,6 +2755,7 @@ private fun CourseEditorDialog(
                 supportingText = { if (nameError) Text("请输入课程名称") },
                 colors = fieldColors
             )
+            OutlinedTextField(value = customShortName, onValueChange = { customShortName = it }, label = { Text("周视图简称（选填）") }, supportingText = { Text("预览：" + customShortName.ifBlank { shortName(name) }) }, modifier = Modifier.fillMaxWidth(), colors = fieldColors)
             Text(
                 text = "时间安排",
                 style = MaterialTheme.typography.labelLarge,
@@ -3180,6 +2884,7 @@ private fun CourseEditorDialog(
                         val saved = Course(
                             id = course?.id ?: System.currentTimeMillis(),
                             name = name.trim(),
+                        shortName = customShortName.trim().ifBlank { null },
                             teacher = teacher.trim(),
                             room = room.trim().ifBlank { "未填写教室" },
                             dayIndex = selectedDay,

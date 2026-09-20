@@ -1,6 +1,7 @@
 package com.burgess.schedule.data
 
 import android.content.Context
+import androidx.room.AutoMigration
 import androidx.room.Database
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
@@ -9,8 +10,9 @@ import androidx.room.RoomDatabase
 
 @Database(
     entities = [CourseEntity::class, PickupCodeEntity::class],
-    version = 5,
-    exportSchema = false
+    version = 6,
+    autoMigrations = [AutoMigration(from = 5, to = 6)],
+    exportSchema = true
 )
 abstract class CourseDatabase : RoomDatabase() {
     abstract fun courseDao(): CourseDao
