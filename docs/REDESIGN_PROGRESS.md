@@ -24,3 +24,9 @@
 - 数据库先导出 v5，再生成 v6 与 5→6 AutoMigration，原四条迁移保留。编辑可选简称并实时预览。
 - 改动：MainActivity.kt、CourseEntity.kt、CourseDatabase.kt、app/build.gradle.kts、schemas/{5,6}.json、ui/week/CourseLabel.kt、CourseLabelTest.kt。编译及既有 17 测试通过，简称测试随下一轮运行。
 - 偏差：拉丁简称按长度判定字号，未使用实际测量；无设备，布局验收以源码与预览定义为限。
+
+## 阶段 5：共享课程详情
+- 官方 SharedTransitionLayout 在 Scaffold/导航之上；来源与详情 sharedBounds，标题独立共享 key，保留来源尺寸；SeekableTransitionState 联动预测返回与下拉，编辑和删除接回现有 DAO；删除 5 秒撤销。
+- 改动：MainActivity.kt、ui/components/CourseTransition.kt、AndroidManifest.xml。assembleDebug、18 项单元测试通过。未切换方案 B，没有证据认定 F1–F4。
+- 验收 1 今日打开关闭十次：未执行，无设备。2 周格子十次：未执行。3 展开中点遮罩：代码支持状态反转，未实测。4 半程下拉：已实现，未实测。5 倍率 1.6：可配置，未录屏。6 导航上层：根级 overlay 已接入，未设备验证。7 最终速度：原 Motion 常量保留，等待用户真机选择。
+- 偏差：最新官方 BOM 为 2026.09.00，但本机 DNS 阻断下载，沿用已有 2026.02.01；圆角/底色尚未完整插值，内容分段透明度未逐项精确实现，不能声明已解决全部帧级瑕疵。

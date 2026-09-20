@@ -142,6 +142,13 @@ import com.burgess.schedule.ui.components.SectionLabel
 import androidx.compose.runtime.key
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.LinearProgressIndicator
+import com.burgess.schedule.ui.components.CourseTransitionHost
+import com.burgess.schedule.ui.components.CourseDetail
+import com.burgess.schedule.ui.components.CourseSource
+import com.burgess.schedule.ui.components.courseTitle
+import kotlinx.coroutines.withTimeoutOrNull
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -529,6 +536,21 @@ private fun ScheduleApp(
         editorVisible = false
     }
 
+    CourseTransitionHost(
+        detail = expandedCourse?.let { CourseDetail(it.id, it.name, periodTimeRange(it), "周${weekDayLabels[it.dayIndex]} · ${periodRangeLabel(it)}", it.room, courseAccentFor(it)) },
+        onDismiss = { expandedCourse = null },
+        onEdit = { expandedCourse?.let { openEditor(course = it) }; expandedCourse = null },
+        onDelete = {
+            expandedCourse?.let { removed ->
+                expandedCourse = null
+                scope.launch {
+                    courseDao.delete(removed.toEntity())
+                    val result = withTimeoutOrNull(5_000L) { snackbarHostState.showSnackbar("已删除", "撤销", duration = SnackbarDuration.Indefinite) }
+                    if (result == SnackbarResult.ActionPerformed) courseDao.upsert(removed.toEntity())
+                }
+            }
+        }
+    ) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
@@ -632,12 +654,6 @@ private fun ScheduleApp(
                         )
                     }
                 }
-            expandedCourse?.let { course ->
-                ExpandedCourseOverlay(
-                    course = course,
-                    onDismiss = { expandedCourse = null }
-                )
-            }
             AnimatedVisibility(
                 visible = devLogVisible,
                 enter = fadeIn(tween(220)) + slideInHorizontally(
@@ -707,6 +723,8 @@ private fun ScheduleApp(
             }
         }
         }
+    }
+
     }
 
     if (designVisible && BuildConfig.DEBUG) {
@@ -1868,7 +1886,7 @@ private fun TimelineCourseCard(course: Course, lesson: TimedLesson, now: Long, h
         }
         Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gridGap), verticalAlignment = Alignment.CenterVertically) {
             if (!highlighted) Box(Modifier.size(AppSpace.cellVertical).background(courseAccentFor(course).copy(alpha = if (ended) .5f else 1f), AppShape.pill))
-            Text(course.name, style = if (large) AppType.sheetTitle else AppType.cardTitle, color = if (highlighted) c.onInk else if (ended) c.mut else c.ink)
+            Text(course.name, modifier = Modifier.courseTitle(course.id), style = if (large) AppType.sheetTitle else AppType.cardTitle, color = if (highlighted) c.onInk else if (ended) c.mut else c.ink)
         }
         Text(periodRangeLabel(course) + " · " + displayLocation(course.room).ifBlank { "未填写" }, style = AppType.caption, color = if (highlighted) c.onInk else c.mut)
         if (active && highlighted) {
@@ -1879,8 +1897,10 @@ private fun TimelineCourseCard(course: Course, lesson: TimedLesson, now: Long, h
             LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(AppSpace.progress), color = c.onInk, trackColor = c.onInk.copy(alpha = .15f))
         }
     }
-    if (highlighted) InkCard(modifier, onClick = { onClick(course) }, content = content)
-    else com.burgess.schedule.ui.components.AppCard(modifier, onClick = { onClick(course) }, content = content)
+    CourseSource(course.id, modifier) {
+        if (highlighted) InkCard(Modifier.fillMaxWidth(), onClick = { onClick(course) }, content = content)
+        else com.burgess.schedule.ui.components.AppCard(Modifier.fillMaxWidth(), onClick = { onClick(course) }, content = content)
+    }
 }
 
 @Preview @Composable private fun TodayLightPreview() { 课程表Theme(false) { TodayScreen(Calendar.getInstance(), emptyList(), null, emptyList(), {}, {}, {}, {}, {}) } }
@@ -1949,144 +1969,6 @@ private fun AppCard(
             modifier = Modifier.padding(16.dp),
             content = content
         )
-    }
-}
-
-@Composable
-private fun ExpandedCourseOverlay(course: Course, onDismiss: () -> Unit) {
-    val visibilityState = remember { MutableTransitionState(false) }
-    var hasStarted by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        visibilityState.targetState = true
-        hasStarted = true
-    }
-    LaunchedEffect(visibilityState.currentState, visibilityState.targetState, hasStarted) {
-        if (hasStarted && !visibilityState.currentState && !visibilityState.targetState) {
-            onDismiss()
-        }
-    }
-
-    fun requestDismiss() {
-        visibilityState.targetState = false
-    }
-
-    BackHandler(enabled = visibilityState.targetState) {
-        requestDismiss()
-    }
-
-    val transition = updateTransition(visibilityState, label = "course detail overlay")
-    val scrimAlpha by transition.animateFloat(
-        transitionSpec = { tween(if (targetState) 300 else 180) },
-        label = "course detail scrim"
-    ) { visible -> if (visible) 0.24f else 0f }
-    val panelAlpha by transition.animateFloat(
-        transitionSpec = { tween(if (targetState) 280 else 170) },
-        label = "course detail panel alpha"
-    ) { visible -> if (visible) 1f else 0f }
-    val panelOffsetFraction by transition.animateFloat(
-        transitionSpec = { tween(if (targetState) 300 else 190) },
-        label = "course detail panel offset"
-    ) { visible -> if (visible) 0f else 1f }
-    val panelScale by transition.animateFloat(
-        transitionSpec = { tween(if (targetState) 280 else 170) },
-        label = "course detail panel scale"
-    ) { visible -> if (visible) 1f else 0.985f }
-
-    if (visibilityState.currentState || visibilityState.targetState) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = scrimAlpha))
-                    .clickable(onClick = { requestDismiss() })
-            )
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .heightIn(max = 640.dp)
-                    .padding(horizontal = 12.dp)
-                    .navigationBarsPadding()
-                    .graphicsLayer {
-                        translationY = panelOffsetFraction * 48.dp.toPx()
-                        scaleX = panelScale
-                        scaleY = panelScale
-                        alpha = panelAlpha
-                    }
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = {}
-                    ),
-                shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                color = CardColor,
-                contentColor = Ink,
-                tonalElevation = 0.dp,
-                shadowElevation = 16.dp
-            ) {
-                Column(
-                    modifier = Modifier
-                        .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 22.dp, vertical = 20.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .width(8.dp)
-                                .height(8.dp)
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(courseAccentFor(course))
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "课程详情",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MutedInk
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = course.name,
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Ink
-                    )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text(
-                        text = "时间",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MutedInk
-                    )
-                    Text(
-                        text = periodRangeLabel(course) + " · " + periodTimeRange(course),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Ink
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "上课地点",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MutedInk
-                    )
-                    Text(
-                        text = displayLocation(course.room).ifBlank { "地点待确认" },
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Ink
-                    )
-                    if (course.teacher.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "教师：" + course.teacher,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MutedInk
-                        )
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -2642,15 +2524,17 @@ private fun CourseSlot(course: Course?, isFocus: Boolean, isInProgress: Boolean,
     val tint = course?.let { courseTint(courseAccentFor(it)) }
     val interaction = remember { MutableInteractionSource() }
     val scale = rememberPressScale(interaction, Motion.PressScale)
+    CourseSource(course?.id ?: -(width.value.toLong() + height.value.toLong()), Modifier.width(width).height(height)) {
     Column(Modifier.width(width).height(height).graphicsLayer { scaleX = scale; scaleY = scale }.clip(AppShape.cell).background(tint?.first ?: c.ink.copy(alpha = .035f)).then(if (isInProgress) Modifier.border(AppSpace.line * 1.5f, c.ink, AppShape.cell) else Modifier).clickable(interaction, null, enabled = course != null || editMode, onClick = onClick).semantics {
         contentDescription = course?.let { "${it.name}，周${weekDayLabels[it.dayIndex]}，${periodTimeRange(it)}，${it.room.ifBlank { "未填写地点" }}" } ?: if (editMode) "添加课程" else "空闲时段"
     }.padding(horizontal = AppSpace.cellHorizontal, vertical = AppSpace.cellVertical), verticalArrangement = Arrangement.spacedBy(AppSpace.gridGap)) {
         if (course != null) {
             val label = course.shortName?.takeIf { it.isNotBlank() } ?: shortName(course.name)
             val latin = label.all { it.code < 128 }
-            Text(label, style = if (latin && label.length > 6) AppType.micro else AppType.cell, color = tint!!.second, maxLines = if (latin) 1 else 2, softWrap = !latin, overflow = TextOverflow.Ellipsis)
+            Text(label, modifier = Modifier.courseTitle(course.id), style = if (latin && label.length > 6) AppType.micro else AppType.cell, color = tint!!.second, maxLines = if (latin) 1 else 2, softWrap = !latin, overflow = TextOverflow.Ellipsis)
             Text(roomNumber(course.room).ifBlank { "未填写" }, style = AppType.micro, color = tint.second, maxLines = 2, overflow = TextOverflow.Ellipsis)
         } else if (editMode) Text("+", style = AppType.cardTitle, color = c.mut)
+    }
     }
 }
 
