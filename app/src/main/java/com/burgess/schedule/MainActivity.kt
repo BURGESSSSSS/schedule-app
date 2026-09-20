@@ -18,6 +18,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateDpAsState
@@ -628,11 +629,10 @@ private fun ScheduleApp(
                     .fillMaxSize()
                     .padding(innerPadding)
             ) {
-                AnimatedContent(
+                Crossfade(
                     targetState = selectedPage,
-                    transitionSpec = {
-                        fadeIn(tween(Motion.TabCrossfadeMs)) togetherWith fadeOut(tween(Motion.TabCrossfadeMs))
-                    },
+                    modifier = Modifier.fillMaxSize(),
+                    animationSpec = tween(Motion.TabCrossfadeMs),
                     label = "page transition"
                 ) { page ->
                     when (page) {
