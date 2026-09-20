@@ -34,6 +34,15 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.ui.platform.LocalDensity
+import com.burgess.schedule.ui.components.ListGroup
+import com.burgess.schedule.ui.components.ListRow
+import com.burgess.schedule.ui.components.SubPageScaffold
+import com.burgess.schedule.ui.components.AppSwitch
+import com.burgess.schedule.ui.components.BottomSheetContainer
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.semantics
@@ -100,7 +109,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
@@ -710,7 +718,11 @@ private fun ScheduleApp(
                     onCopy = { copyPickupCode(it.code) },
                     onQuickPickup = { quickPickupEntry = it },
                     onTogglePicked = { entry ->
-                        scope.launch { pickupDao.setPicked(entry.id, !entry.picked) }
+                        scope.launch {
+                            pickupDao.setPicked(entry.id, !entry.picked)
+                            val result = withTimeoutOrNull(5_000L) { snackbarHostState.showSnackbar(if (entry.picked) "已标记待取" else "已标记已取件", "撤销", duration = SnackbarDuration.Indefinite) }
+                            if (result == SnackbarResult.ActionPerformed) pickupDao.setPicked(entry.id, entry.picked)
+                        }
                     }
                 )
             }
@@ -885,36 +897,36 @@ private fun PickupScreen(
     onQuickPickup: (PickupCodeEntity) -> Unit,
     onTogglePicked: (PickupCodeEntity) -> Unit
 ) {
+    var adding by remember { mutableStateOf(false) }
+    var codeInput by remember { mutableStateOf("") }
+    var stationInput by remember { mutableStateOf("") }
+    if (adding) BottomSheetContainer({ adding = false }) {
+        Text("添加取件码", style = AppType.sheetTitle, color = Ink)
+        OutlinedTextField(codeInput, { codeInput = it }, label = { Text("取件码") })
+        OutlinedTextField(stationInput, { stationInput = it }, label = { Text("驿站或快递名") })
+        com.burgess.schedule.ui.components.PillButton("保存取件码", {
+            if (codeInput.isNotBlank()) {
+                onPickupCodes(listOf(PickupCodeEntity(code = codeInput.trim(), station = stationInput.trim(), status = "待取", picked = false, createdAt = System.currentTimeMillis())))
+                codeInput = ""; stationInput = ""; adding = false
+            }
+        })
+    }
     var trackingInput by remember { mutableStateOf("") }
     val normalizedTrackingNumber = normalizeTrackingNumber(trackingInput)
     BackHandler(onBack = onBack)
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(Gray50, Gray100)))
+            .background(Gray50)
             .verticalScroll(rememberScrollState())
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(onClick = onBack) {
-                Text("‹ 返回")
-            }
-            Text(
-                text = "取件码",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = Ink,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(onClick = onLogout) {
-                Text("退出账号")
-            }
+        Row(Modifier.fillMaxWidth().padding(AppSpace.page), verticalAlignment = Alignment.CenterVertically) {
+            com.burgess.schedule.ui.components.CircleIconButton("‹", onBack)
+            Spacer(Modifier.weight(1f))
+            com.burgess.schedule.ui.components.PillButton("添加", { adding = true }, com.burgess.schedule.ui.components.PillStyle.Secondary, true)
+            com.burgess.schedule.ui.components.PillButton("退出账号", onLogout, com.burgess.schedule.ui.components.PillStyle.Ghost, true)
         }
+        Text("取件码", Modifier.padding(horizontal = AppSpace.page), style = AppType.title, color = Ink)
         webViewUrl?.let { targetUrl ->
             PickupWebViewPanel(
                 targetUrl = targetUrl,
@@ -1009,7 +1021,8 @@ private fun PickupScreen(
                 }
             }
         } else {
-            codes.forEach { entry ->
+            codes.sortedBy { it.picked }.forEachIndexed { index, entry ->
+                if (index == 0 || entry.picked != codes.sortedBy { it.picked }[index - 1].picked) Text(if (entry.picked) "已取件" else "待取件", Modifier.padding(AppSpace.page), style = AppType.caption, color = MutedInk)
                 PickupCodeCard(
                     entry = entry,
                     onOpen = { onQuickPickup(entry) },
@@ -1051,45 +1064,21 @@ private fun PickupCodeCard(
     onCopy: () -> Unit,
     onTogglePicked: () -> Unit
 ) {
-    AppCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .clickable(onClick = onOpen)
-    ) {
+    val density = LocalDensity.current
+    var drag by remember { mutableStateOf(0f) }
+    val color = if (entry.picked) MutedInk else Ink
+    com.burgess.schedule.ui.components.AppCard(Modifier.fillMaxWidth().padding(horizontal = AppSpace.page, vertical = AppSpace.gridGap).draggable(rememberDraggableState { drag += it }, Orientation.Horizontal, onDragStarted = { drag = 0f }, onDragStopped = { if (!entry.picked && drag < -with(density) { AppSpace.touch.toPx() }) onTogglePicked(); drag = 0f }), onClick = onOpen) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = entry.code,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (entry.picked) FaintInk else Ink,
-                    letterSpacing = 2.sp
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = entry.station.ifBlank { "驿站未标注" } + " · " + formatPickupTime(entry.createdAt),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MutedInk
-                )
-            }
-            if (entry.picked) {
-                Text(
-                    text = "已取",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = FaintInk
-                )
-            } else {
-                TextButton(onClick = onCopy) {
-                    Text("复制")
-                }
-                TextButton(onClick = onTogglePicked) {
-                    Text("已取")
-                }
-            }
+            Text(entry.code, Modifier.weight(1f), style = AppType.sheetTitle.copy(letterSpacing = 1.sp), color = color)
+            Box(Modifier.background(Ink.copy(alpha = .06f), AppShape.pill).padding(AppSpace.gridGap)) { Text(if (entry.picked) "已取" else "待取", style = AppType.caption, color = MutedInk) }
+            com.burgess.schedule.ui.components.PillButton("复制", onCopy, com.burgess.schedule.ui.components.PillStyle.Ghost, true)
         }
+        Text(entry.station + " · " + formatPickupTime(entry.createdAt), style = AppType.caption, color = MutedInk)
+        com.burgess.schedule.ui.components.PillButton(if (entry.picked) "标记待取" else "标记已取件", onTogglePicked, com.burgess.schedule.ui.components.PillStyle.Ghost, true)
     }
 }
+@Preview @Composable private fun PickupLight() { 课程表Theme(false) { PickupCodeCard(PickupCodeEntity(code="8-1024", station="校园驿站", status="待取", picked=false, createdAt=0), {}, {}, {}) } }
+@Preview @Composable private fun PickupDark() { 课程表Theme(true) { PickupCodeCard(PickupCodeEntity(code="8-1024", station="校园驿站", status="已取", picked=true, createdAt=0), {}, {}, {}) } }
 
 @Composable
 private fun QuickPickupCodeOverlay(
@@ -1450,180 +1439,36 @@ private val devLogEntries = listOf(
 
 @Composable
 private fun DevLogScreen(onBack: () -> Unit) {
-    var detailVisible by remember { mutableStateOf(false) }
-    var currentEntry by remember { mutableStateOf<DevLogEntry?>(null) }
-
-    BackHandler(enabled = detailVisible) {
-        detailVisible = false
-    }
-    BackHandler(enabled = !detailVisible) {
-        onBack()
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(Gray50, Gray100)))
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(onClick = onBack) {
-                    Text("‹ 返回")
+    BackHandler(onBack = onBack)
+    SubPageScaffold("开发日志", onBack) {
+        devLogEntries.forEachIndexed { index, entry ->
+            key(entry.version) {
+                var expanded by remember { mutableStateOf(index == 0) }
+                com.burgess.schedule.ui.components.AppCard(Modifier.fillMaxWidth(), onClick = { expanded = !expanded }) {
+                    Text(entry.version, style = AppType.cardTitle, color = Ink)
+                    SectionLabel(entry.date)
+                    AnimatedVisibility(expanded, enter = fadeIn(tween(Motion.TabCrossfadeMs)), exit = fadeOut(tween(Motion.TabCrossfadeMs))) {
+                        Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+                            if (entry.intro.isNotBlank()) Text(entry.intro, style = AppType.body, color = MutedInk)
+                            entry.sections.forEach { section ->
+                                Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+                                    Box(Modifier.padding(top = AppSpace.cellVertical).size(AppSpace.gridGap).background(MutedInk, AppShape.pill))
+                                    Column {
+                                        Text(section.title, style = AppType.cardTitle, color = Ink)
+                                        if (section.body.isNotBlank()) Text(section.body, style = AppType.body, color = MutedInk)
+                                    }
+                                }
+                            }
+                            if (entry.closing.isNotBlank()) Text(entry.closing, style = AppType.body, color = MutedInk)
+                        }
+                    }
                 }
-                Text(
-                    text = "开发日志",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Ink,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(modifier = Modifier.width(64.dp))
-            }
-            devLogEntries.forEachIndexed { index, entry ->
-                StaggeredReveal(index) {
-                    DevLogVersionRow(entry = entry, onClick = {
-                        currentEntry = entry
-                        detailVisible = true
-                    })
-                }
-            }
-            Spacer(modifier = Modifier.height(24.dp))
-        }
-        AnimatedVisibility(
-            visible = detailVisible,
-            enter = fadeIn(tween(200)) + slideInHorizontally(
-                animationSpec = tween(280),
-                initialOffsetX = { it }
-            ),
-            exit = fadeOut(tween(200)) + slideOutHorizontally(
-                animationSpec = tween(240),
-                targetOffsetX = { it }
-            )
-        ) {
-            currentEntry?.let { entry ->
-                DevLogDetailScreen(entry = entry, onBack = { detailVisible = false })
             }
         }
     }
 }
-
-@Composable
-private fun DevLogVersionRow(entry: DevLogEntry, onClick: () -> Unit) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressScale = rememberPressScale(interactionSource)
-    AppCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
-            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "V" + entry.version,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Ink
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = entry.date,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MutedInk
-                )
-            }
-            Text(
-                text = "›",
-                style = MaterialTheme.typography.titleMedium,
-                color = FaintInk
-            )
-        }
-    }
-}
-
-@Composable
-private fun DevLogDetailScreen(entry: DevLogEntry, onBack: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(Gray50, Gray100)))
-            .verticalScroll(rememberScrollState())
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(onClick = onBack) {
-                Text("‹ 返回")
-            }
-            Text(
-                text = "V" + entry.version,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = Ink,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(modifier = Modifier.width(64.dp))
-        }
-        AppCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-        ) {
-            Text(
-                text = entry.date,
-                style = MaterialTheme.typography.labelMedium,
-                color = MutedInk
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            if (entry.intro.isNotBlank()) {
-                Text(
-                    text = entry.intro,
-                    style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
-                    color = MutedInk
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-            entry.sections.forEach { section ->
-                Text(
-                    text = section.title,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Ink
-                )
-                if (section.body.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(5.dp))
-                    Text(
-                        text = section.body,
-                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
-                        color = MutedInk
-                    )
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-            Text(
-                text = entry.closing,
-                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
-                color = MutedInk
-            )
-        }
-        Spacer(modifier = Modifier.height(24.dp))
-    }
-}
+@Preview @Composable private fun DevLogLight() { 课程表Theme(false) { DevLogScreen({}) } }
+@Preview @Composable private fun DevLogDark() { 课程表Theme(true) { DevLogScreen({}) } }
 
 @Composable
 private fun rememberPressScale(
@@ -1640,133 +1485,51 @@ private fun rememberPressScale(
 }
 
 @Composable
-private fun MoreScreen(
-    today: Calendar,
-    onReminderClick: () -> Unit,
-    onPickupClick: () -> Unit,
-    onDevLogClick: () -> Unit,
-    onDesignClick: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-    ) {
-        if (BuildConfig.DEBUG) { TextButton(onClick = onDesignClick) { Text("设计预览") } }
-        StaggeredReveal(0) {
-            ScheduleHeader(
-                title = "更多",
-                today = today,
-                showActions = false
-            )
-        }
-        StaggeredReveal(1) {
-            AppCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Text(
-                    text = "课程表",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Ink
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "一款专注于快速查看课程、下一节课和上课地点的本地课程表工具。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MutedInk
-                )
+private fun MoreScreen(today: Calendar, onReminderClick: () -> Unit, onPickupClick: () -> Unit, onDevLogClick: () -> Unit, onDesignClick: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snack = remember { SnackbarHostState() }
+    val theme by remember { Appearance.theme(context) }.collectAsState(initial = "跟随系统")
+    var themeVisible by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(AppSpace.page), verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+            Text("更多", style = AppType.title, color = Ink)
+            SectionLabel("设置与工具")
+            Spacer(Modifier.height(AppSpace.gap))
+            SectionLabel("功能")
+            ListGroup {
+                ListRow("课程提醒", "通知权限和测试通知", onReminderClick)
+                HorizontalDivider(color = Hairline)
+                ListRow("取件码", "包裹取件码和驿站", onPickupClick)
             }
-        }
-        StaggeredReveal(2) {
-            MoreActionRow(
-                title = "课程提醒",
-                subtitle = "通知权限和测试通知",
-                onClick = onReminderClick
-            )
-        }
-        StaggeredReveal(3) {
-            MoreActionRow(
-                title = "取件码",
-                subtitle = "包裹取件码和驿站",
-                onClick = onPickupClick
-            )
-        }
-        StaggeredReveal(4) {
-            MoreActionRow(
-                title = "开发日志",
-                subtitle = "1.0.0 - 1.3.2 更新记录",
-                onClick = onDevLogClick
-            )
-        }
-        StaggeredReveal(5) {
-            AppCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Image(
-                        painter = painterResource(id = R.drawable.developer_avatar),
-                        contentDescription = "开发者头像",
-                        modifier = Modifier
-                            .width(72.dp)
-                            .height(72.dp)
-                            .clip(RoundedCornerShape(20.dp)),
-                        contentScale = ContentScale.Crop
-                    )
-                    Spacer(modifier = Modifier.width(14.dp))
-                    Column {
-                        Text(
-                            text = "开发者",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MutedInk
-                        )
-                        Text(
-                            text = "Arihara",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Ink
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(14.dp))
-                Text(
-                    text = "为爱发电❤",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MutedInk
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "邮箱：suyu20651@gmail.com",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MutedInk
-                )
+            Spacer(Modifier.height(AppSpace.gap))
+            SectionLabel("外观")
+            ListGroup { ListRow("主题", theme, { themeVisible = true }) }
+            Spacer(Modifier.height(AppSpace.gap))
+            SectionLabel("关于")
+            ListGroup {
+                ListRow("开发日志", "查看更新记录", onDevLogClick)
+                HorizontalDivider(color = Hairline)
+                ListRow("Arihara", "为爱发电", {
+                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("开发者邮箱", "suyu20651@gmail.com"))
+                    scope.launch { snack.showSnackbar("已复制邮箱") }
+                }, trailing = { Image(painterResource(R.drawable.developer_avatar), "开发者头像", Modifier.size(AppSpace.iconButton).clip(AppShape.pill), contentScale = ContentScale.Crop) })
             }
+            if (BuildConfig.DEBUG) com.burgess.schedule.ui.components.PillButton("设计预览", onDesignClick, com.burgess.schedule.ui.components.PillStyle.Ghost, true)
+            Spacer(Modifier.height(AppSpace.card * 2))
+            Text("课程表 ${BuildConfig.VERSION_NAME} · 数据仅保存在本机", Modifier.fillMaxWidth(), style = AppType.caption, color = MutedInk, textAlign = TextAlign.Center)
         }
-        StaggeredReveal(6) {
-            AppCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Text(
-                    text = "版本 1.3.2",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MutedInk
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "课程表和取件码数据均保存在本机。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MutedInk
-                )
-            }
+        SnackbarHost(snack, Modifier.align(Alignment.BottomCenter)) { com.burgess.schedule.ui.components.AppSnackbar(it) }
+    }
+    if (themeVisible) BottomSheetContainer({ themeVisible = false }) {
+        Text("主题", style = AppType.sheetTitle, color = Ink)
+        listOf("跟随系统", "浅色", "深色").forEach { option ->
+            ListRow(option, onClick = { scope.launch { Appearance.setTheme(context, option) }; themeVisible = false }, trailing = { androidx.compose.material3.RadioButton(theme == option, onClick = { scope.launch { Appearance.setTheme(context, option) }; themeVisible = false }) })
         }
     }
 }
+@Preview @Composable private fun MoreLight() { 课程表Theme(false) { MoreScreen(Calendar.getInstance(), {}, {}, {}, {}) } }
+@Preview @Composable private fun MoreDark() { 课程表Theme(true) { MoreScreen(Calendar.getInstance(), {}, {}, {}, {}) } }
 
 @Composable
 private fun MoreActionRow(
@@ -1958,7 +1721,7 @@ private fun AppCard(
     color: Color = CardColor,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val shape = RoundedCornerShape(14.dp)
+    val shape = AppShape.card
     Box(
         modifier = modifier
             .clip(shape)
@@ -2277,70 +2040,25 @@ private fun ReminderDialog(
     onRequestExactAlarm: () -> Unit,
     onSendTest: () -> Unit
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("课程提醒") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "课程提醒",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = if (status.remindersEnabled) "上课前 20 分钟提醒" else "已关闭，不会安排提醒",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MutedInk
-                        )
-                    }
-                    Switch(
-                        checked = status.remindersEnabled,
-                        onCheckedChange = onToggle
-                    )
-                }
-                Text(
-                    text = when {
-                        !status.notificationPermissionGranted -> "通知权限未授予。"
-                        !status.notificationsEnabled -> "系统通知已关闭。"
-                        else -> "通知不会创建闹钟页面，可在系统设置中随时关闭。"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (!status.notificationPermissionGranted) {
-                    TextButton(onClick = onRequestPermission) {
-                        Text("授权通知权限")
-                    }
-                }
-                if (status.remindersEnabled && !status.exactAlarmAllowed) {
-                    Text(
-                        text = "未授权精确闹钟，将使用系统允许的非精确提醒。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MutedInk
-                    )
-                    TextButton(onClick = onRequestExactAlarm) {
-                        Text("允许更准的提醒")
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = onSendTest) {
-                Text("发送测试")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("关闭")
+    BottomSheetContainer(onDismiss) {
+        Text("课程提醒", style = AppType.title, color = Ink)
+        if (!status.notificationPermissionGranted || !status.notificationsEnabled) {
+            SectionLabel("系统通知尚未开启，课程开始前无法显示提醒。请在系统设置中允许通知。")
+            com.burgess.schedule.ui.components.PillButton("去开启", onRequestPermission)
+        }
+        ListGroup {
+            ListRow("开启提醒", if (status.remindersEnabled) "上课前 20 分钟提醒" else "提醒已关闭", trailing = { AppSwitch(status.remindersEnabled, onToggle) })
+            HorizontalDivider(color = Hairline)
+            ListRow("发送测试通知", "检查通知是否正常显示", onSendTest)
+            if (!status.exactAlarmAllowed) {
+                HorizontalDivider(color = Hairline)
+                ListRow("允许精确提醒", "在系统设置中允许闹钟和提醒权限", onRequestExactAlarm)
             }
         }
-    )
+    }
 }
+@Preview @Composable private fun ReminderLight() { 课程表Theme(false) { ReminderDialog(ReminderStatus(true, false, false, false), {}, {}, {}, {}, {}) } }
+@Preview @Composable private fun ReminderDark() { 课程表Theme(true) { ReminderDialog(ReminderStatus(true, true, true, true), {}, {}, {}, {}, {}) } }
 
 @Composable
 private fun WeekNavigator(
@@ -2800,7 +2518,7 @@ private fun EditorSelectField(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val shape = RoundedCornerShape(14.dp)
+    val shape = AppShape.card
     Box(
         modifier = modifier
             .clip(shape)
