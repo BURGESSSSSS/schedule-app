@@ -9,7 +9,9 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalContext
 import android.provider.Settings
 import androidx.core.view.WindowCompat
+import androidx.compose.material.ripple.RippleAlpha
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun 课程表Theme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
     val context = LocalContext.current
@@ -31,7 +33,13 @@ fun 课程表Theme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composa
             }
         }
     }
-    CompositionLocalProvider(LocalAppColors provides c) {
+    CompositionLocalProvider(
+        LocalAppColors provides c,
+        LocalRippleConfiguration provides RippleConfiguration(
+            color = c.ink,
+            rippleAlpha = RippleAlpha(draggedAlpha = .08f, focusedAlpha = .08f, hoveredAlpha = .08f, pressedAlpha = .08f)
+        )
+    ) {
         MaterialTheme(colorScheme = scheme.copy(
             primary = c.ink, onPrimary = c.onInk, primaryContainer = c.line, onPrimaryContainer = c.ink,
             secondary = c.ink, onSecondary = c.onInk, secondaryContainer = c.line, onSecondaryContainer = c.ink,

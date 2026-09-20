@@ -764,7 +764,7 @@ private fun ScheduleApp(
     }
 
     if (designVisible && BuildConfig.DEBUG) {
-        Dialog(onDismissRequest = { designVisible = false }) { com.burgess.schedule.ui.components.DesignPreview() }
+        Dialog(onDismissRequest = { designVisible = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) { com.burgess.schedule.ui.components.DesignPreview(onClose = { designVisible = false }) }
     }
 
     if (editorVisible) {
@@ -1683,18 +1683,7 @@ private fun AppCard(
     color: Color = CardColor,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val shape = AppShape.card
-    Box(
-        modifier = modifier
-            .clip(shape)
-            .background(color)
-            .border(1.dp, Hairline, shape)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            content = content
-        )
-    }
+    com.burgess.schedule.ui.components.AppCard(modifier = modifier, color = color, content = content)
 }
 
 @Composable
@@ -1896,52 +1885,18 @@ private fun OcrPreviewDialog(
 
 @Composable
 private fun PillButton(text: String, filled: Boolean, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(50)
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressScale = rememberPressScale(interactionSource, pressedScale = 0.95f)
-    Box(
-        modifier = Modifier
-            .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
-            .clip(shape)
-            .background(if (filled) Ink else Gray100)
-            .border(
-                width = 1.dp,
-                color = if (filled) Color.Transparent else MaterialTheme.colorScheme.outlineVariant,
-                shape = shape
-            )
-            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 7.dp)
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = if (filled) CardColor else Ink
-        )
-    }
+    com.burgess.schedule.ui.components.PillButton(
+        text, onClick,
+        if (filled) com.burgess.schedule.ui.components.PillStyle.Primary else com.burgess.schedule.ui.components.PillStyle.Secondary,
+        small = true
+    )
 }
 
 @Composable
 private fun CompactActionButton(text: String, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(11.dp)
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressScale = rememberPressScale(interactionSource, pressedScale = 0.96f)
-    Box(
-        modifier = Modifier
-            .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
-            .clip(shape)
-            .background(Gray50)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape)
-            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 5.dp)
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = Ink
-        )
-    }
+    com.burgess.schedule.ui.components.PillButton(
+        text, onClick, com.burgess.schedule.ui.components.PillStyle.Secondary, small = true
+    )
 }
 
 @Composable

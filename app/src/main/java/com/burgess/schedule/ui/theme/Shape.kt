@@ -11,6 +11,7 @@ object AppSpace {
     val row = 64.dp; val icon = 36.dp; val navSpace = 96.dp; val navElevation = 8.dp
     val axis = 34.dp; val gridGap = 4.dp; val gridRow = 104.dp; val timeline = 42.dp
     val date = 28.dp; val cellHorizontal = 5.dp; val cellVertical = 8.dp; val progress = 3.dp
+    val glyph = 24.dp
 }
 object AppShape {
     val card = RoundedCornerShape(AppSpace.cardRadius)
