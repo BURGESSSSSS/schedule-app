@@ -1,5 +1,6 @@
 package com.burgess.schedule.ui.today
 
+@androidx.compose.runtime.Immutable
 data class TimedLesson(val id: Long, val start: Long, val end: Long)
 enum class DayState { EMPTY, FREE, ACTIVE, UPCOMING, FINISHED }
 data class TimelineState(val state: DayState, val today: List<TimedLesson>, val focus: TimedLesson?, val next: TimedLesson?)
@@ -21,3 +22,11 @@ fun countdown(milliseconds: Long, remaining: Boolean = false): String {
         else -> "$prefix ${minutes / 1440} 天"
     }
 }
+
+/** The highlighted next lesson must never be repeated in the preview below it. */
+fun remainingPreviewLessons(lessons: List<TimedLesson>, next: TimedLesson, nextDayEnd: Long) =
+    lessons.filter { it.start >= next.start && it.start < nextDayEnd && it.id != next.id }
+        .sortedWith(compareBy<TimedLesson> { it.start }.thenBy { it.id })
+
+fun lessonProgress(lesson: TimedLesson, now: Long): Float =
+    if (lesson.end <= lesson.start) 0f else ((now - lesson.start).toFloat() / (lesson.end - lesson.start)).coerceIn(0f, 1f)

@@ -167,6 +167,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
+@androidx.compose.runtime.Immutable
 private data class Course(
     val id: Long,
     val name: String,
@@ -345,7 +346,7 @@ private fun ScheduleApp(
     }
     val courseEntities by courseDao.observeAll()
         .collectAsState(initial = null as List<CourseEntity>?)
-    val courses = courseEntities?.map { it.toCourse() }.orEmpty()
+    val courses = remember(courseEntities) { courseEntities?.map { it.toCourse() }.orEmpty() }
     var designVisible by remember { mutableStateOf(false) }
     var selectedPage by remember { mutableStateOf(0) }
     var expandedCourse by remember { mutableStateOf<Course?>(null) }
@@ -394,8 +395,11 @@ private fun ScheduleApp(
         }
     }
     var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        (hostContext as LifecycleOwner).lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+    // Only visible course pages need a minute ticker; overlays and background stop it.
+    val scheduleVisible = selectedPage in 0..1 && expandedCourse == null && !designVisible &&
+        !editorVisible && !ocrVisible && !reminderVisible && !devLogVisible && !pickupVisible && !importOptionsVisible
+    LaunchedEffect(scheduleVisible) {
+        if (scheduleVisible) (hostContext as LifecycleOwner).lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
                 nowMillis = System.currentTimeMillis()
                 delay(60_000L - nowMillis % 60_000L)
@@ -1549,8 +1553,8 @@ private fun TodayScreen(
     val tomorrow = start.cloneCalendar().apply { add(Calendar.DAY_OF_YEAR, 1) }
     val timed = remember(courses) { courses.map { it.timedLesson() } }
     val state = timelineState(timed, today.timeInMillis, start.timeInMillis, tomorrow.timeInMillis)
-    val byId = courses.associateBy { it.id }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(AppSpace.page), verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+    val byId = remember(courses) { courses.associateBy { it.id } }
+    val header: @Composable () -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("周" + weekDayLabels[currentDayIndex(today)], style = AppType.title, color = Ink)
@@ -1558,12 +1562,24 @@ private fun TodayScreen(
             }
             AppChip(if (state.today.isEmpty()) "今天没课" else "${state.today.size} 节课")
         }
-        if (state.state == DayState.EMPTY) {
-            Text("还没有课程", style = AppType.sheetTitle, color = Ink)
-            SectionLabel("导入课表截图，或手动添加第一门课程。")
-            com.burgess.schedule.ui.components.PillButton("导入课表", onImport)
-            com.burgess.schedule.ui.components.PillButton("手动添加", onAdd, com.burgess.schedule.ui.components.PillStyle.Secondary)
+    }
+    if (state.state == DayState.EMPTY) {
+        Column(Modifier.fillMaxSize().padding(AppSpace.page)) {
+            header()
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Column(Modifier.verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+                    Text("还没有课程", style = AppType.sheetTitle, color = Ink)
+                    SectionLabel("导入课表，或手动添加第一门课程。")
+                    com.burgess.schedule.ui.components.PillButton("导入课表", onImport)
+                    com.burgess.schedule.ui.components.PillButton("手动添加", onAdd, com.burgess.schedule.ui.components.PillStyle.Secondary)
+                }
+            }
+            if (pendingPickups.isNotEmpty()) PickupBriefCard(pendingPickups, onPickupOpen, onPickupCopy)
         }
+        return
+    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(AppSpace.page), verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+        header()
         state.today.forEach { lesson ->
             key(lesson.id) {
                 byId[lesson.id]?.let { course ->
@@ -1587,7 +1603,7 @@ private fun TodayScreen(
                     TimelineCourseCard(course, next, today.timeInMillis, true, Modifier.fillMaxWidth(), onCourseClick, "$dayLabel ${SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(next.start))}", true)
                 }
                 val nextDayEnd = nextDate.cloneCalendar().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); add(Calendar.DAY_OF_YEAR, 1) }.timeInMillis
-                val rest = timed.filter { it.start >= next.start && it.start < nextDayEnd && it.id != next.id }.sortedBy { it.start }
+                val rest = remainingPreviewLessons(timed, next, nextDayEnd)
                 if (rest.isNotEmpty()) SectionLabel("${dayLabel}还有 ${rest.size} 节课")
                 rest.forEach { lesson -> byId[lesson.id]?.let { TimelineCourseCard(it, lesson, today.timeInMillis, false, Modifier.fillMaxWidth(), onCourseClick) } }
             } ?: if (state.state != DayState.EMPTY) SectionLabel("暂时没有后续课程，可到周视图添加或导入。") else Unit
@@ -1605,7 +1621,12 @@ private fun TimelineCourseCard(course: Course, lesson: TimedLesson, now: Long, h
         if (highlighted) {
             Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gridGap), verticalAlignment = Alignment.CenterVertically) {
                 if (active) Box(Modifier.size(AppSpace.cellVertical).background(c.live, AppShape.pill))
-                Text((if (active) "进行中" else "下一节") + " · " + (if (dateLabel.isEmpty()) "" else "$dateLabel · ") + countdown(if (active) lesson.end - now else lesson.start - now, active), style = AppType.caption, color = c.onInk)
+                Text((if (active) "进行中" else "下一节") + " · " +
+                    if (dateLabel.isEmpty()) countdown(if (active) lesson.end - now else lesson.start - now, active) else dateLabel,
+                    style = AppType.caption, color = c.onInk)
+            }
+            if (dateLabel.isNotEmpty()) {
+                Text(countdown(lesson.start - now), style = AppType.caption, color = c.onInk)
             }
             Spacer(Modifier.height(AppSpace.gap))
         }
@@ -1615,11 +1636,13 @@ private fun TimelineCourseCard(course: Course, lesson: TimedLesson, now: Long, h
         }
         Text(periodRangeLabel(course) + " · " + displayLocation(course.room).ifBlank { "未填写" }, style = AppType.caption, color = if (highlighted) c.onInk else c.mut)
         if (active && highlighted) {
-            var entered by remember(course.id) { mutableStateOf(false) }
-            LaunchedEffect(course.id) { entered = true }
-            val progress by animateFloatAsState(if (entered) ((now - lesson.start).toFloat() / (lesson.end - lesson.start)).coerceIn(0f, 1f) else 0f, tween(Motion.ProgressBarMs), label = "课程进度")
+            val entry = remember(course.id) { androidx.compose.animation.core.Animatable(0f) }
+            LaunchedEffect(course.id) { entry.animateTo(1f, tween(Motion.ProgressBarMs, easing = Motion.EmphasizedDecelerate)) }
             Spacer(Modifier.height(AppSpace.gap))
-            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(AppSpace.progress), color = c.onInk, trackColor = c.onInk.copy(alpha = .15f))
+            LinearProgressIndicator(
+                progress = { lessonProgress(lesson, now) * entry.value },
+                modifier = Modifier.fillMaxWidth().height(AppSpace.progress), color = c.onInk, trackColor = c.onInk.copy(alpha = .15f)
+            )
         }
     }
     CourseSource(course.id, modifier) {
