@@ -8,3 +8,8 @@
 - 改动文件：app/build.gradle.kts、MainActivity.kt、ui/theme/{Color,Theme,Type,Shape,Motion,Appearance}.kt、ui/components/Components.kt、ui/CourseContrastTest.kt。
 - 偏差：本机 DNS 无法解析 Maven 和 GitHub，DataStore 暂用隔离的 SharedPreferences 实现；Inter 下载未完成，暂用系统字体。基础组件共用浅/深组件画廊预览，尚非每个函数独立预览。图标素材与统一 ripple 待补充。课程文字按 .32 起每次 +.04 自动提高混合比例至对比度合格。新尺寸 token 仅集中命名规范已给出的尺寸；未请求中途审批，遵从用户最新授权。
 - 真机：ADB 无设备，视觉及触感验收待验证。
+
+## 阶段 2：底部导航
+- 新增 FloatingNavigation，三项纯文字、移动选中背景、静态阴影、96dp 加系统导航 inset。Scaffold 将底部空间传给所有页面。Tab 改为交叉淡入淡出。
+- 改动：MainActivity.kt、ui/components/FloatingNavigation.kt。assembleDebug 通过，浅深预览齐全。
+- 偏差：手势/三键导航尚未真机验证；触感采用 ContextClick 并忽略不支持情况。

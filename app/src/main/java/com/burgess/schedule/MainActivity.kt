@@ -538,15 +538,7 @@ private fun ScheduleApp(
                 AnimatedContent(
                     targetState = selectedPage,
                     transitionSpec = {
-                        val direction = if (targetState >= initialState) 1 else -1
-                        (fadeIn(tween(260)) + slideInHorizontally(
-                            animationSpec = tween(320),
-                            initialOffsetX = { direction * it / 10 }
-                        )) togetherWith
-                            (fadeOut(tween(180)) + slideOutHorizontally(
-                                animationSpec = tween(220),
-                                targetOffsetX = { -direction * it / 10 }
-                            ))
+                        fadeIn(tween(Motion.TabCrossfadeMs)) togetherWith fadeOut(tween(Motion.TabCrossfadeMs))
                     },
                     label = "page transition"
                 ) { page ->
@@ -2068,67 +2060,7 @@ private fun WeekScreen(
 
 @Composable
 private fun AppBottomNavigation(selectedPage: Int, onPageSelected: (Int) -> Unit) {
-    Surface(color = CardColor) {
-        Column {
-            HorizontalDivider(thickness = 1.dp, color = Hairline)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .windowInsetsPadding(WindowInsets.navigationBars)
-            ) {
-                NavigationItem("今", "今日", selectedPage == 0) { onPageSelected(0) }
-                NavigationItem("周", "周视图", selectedPage == 1) { onPageSelected(1) }
-                NavigationItem("⋮", "更多", selectedPage == 2) { onPageSelected(2) }
-            }
-        }
-    }
-}
-
-@Composable
-private fun RowScope.NavigationItem(
-    icon: String,
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    val indicatorWidth by animateDpAsState(
-        targetValue = if (selected) 30.dp else 0.dp,
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
-        label = "navigation selection indicator"
-    )
-    Column(
-        modifier = Modifier
-            .weight(1f)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            )
-            .padding(vertical = 9.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = icon,
-            fontSize = 18.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-            color = if (selected) Ink else FaintInk
-        )
-        Spacer(modifier = Modifier.height(2.dp))
-        Box(
-            modifier = Modifier
-                .width(indicatorWidth)
-                .height(3.dp)
-                .clip(RoundedCornerShape(50))
-                .background(if (selected) Accent else Color.Transparent)
-        )
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-            color = if (selected) Ink else FaintInk
-        )
-    }
+    com.burgess.schedule.ui.components.FloatingNavigation(selectedPage, onPageSelected)
 }
 
 @Composable
