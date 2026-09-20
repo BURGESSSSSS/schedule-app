@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.util.zip.ZipFile
 import org.gradle.api.tasks.testing.Test
 
 plugins {
@@ -57,6 +58,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -91,12 +93,45 @@ val debugUnitTestKotlinClasses = layout.buildDirectory.dir(
 val debugMainKotlinClasses = layout.buildDirectory.dir(
     "intermediates/built_in_kotlinc/debug/compileDebugKotlin/classes"
 )
+val portableTestClasses = tasks.register<Jar>("portableTestClasses") {
+    dependsOn("compileDebugUnitTestKotlin")
+    from(debugUnitTestKotlinClasses)
+    destinationDirectory.set(file("D:/CourseScheduleProjectCache/test-runtime"))
+    archiveFileName.set("schedule-tests.jar")
+}
+val portableMainClasses = tasks.register<Jar>("portableMainClasses") {
+    dependsOn("compileDebugKotlin")
+    from(debugMainKotlinClasses)
+    destinationDirectory.set(file("D:/CourseScheduleProjectCache/test-runtime"))
+    archiveFileName.set("schedule-main.jar")
+}
+val portableAndroidRuntime = tasks.register("portableAndroidRuntime") {
+    val runtime = configurations.getByName("debugUnitTestRuntimeClasspath")
+    inputs.files(runtime)
+    val destination = file("D:/CourseScheduleProjectCache/test-runtime/android")
+    outputs.dir(destination)
+    doLast {
+        destination.mkdirs()
+        runtime.files.filter { it.extension == "aar" }.forEach { aar ->
+            ZipFile(aar).use { zip ->
+                zip.getEntry("classes.jar")?.let { entry ->
+                    zip.getInputStream(entry).use { input ->
+                        destination.resolve(aar.nameWithoutExtension + ".jar").outputStream().use { output -> input.copyTo(output) }
+                    }
+                }
+            }
+        }
+    }
+}
 tasks.register<Test>("verifyDebugUnitTests") {
+    dependsOn(portableAndroidRuntime)
+    dependsOn(portableTestClasses, portableMainClasses)
     dependsOn("compileDebugKotlin", "compileDebugUnitTestKotlin")
     testClassesDirs = project.files(debugUnitTestKotlinClasses)
     classpath = project.files(
-        debugUnitTestKotlinClasses,
-        debugMainKotlinClasses,
+        portableTestClasses.flatMap { it.archiveFile },
+        portableMainClasses.flatMap { it.archiveFile },
+        fileTree("D:/CourseScheduleProjectCache/test-runtime/android") { include("*.jar") },
         configurations.getByName("debugUnitTestRuntimeClasspath")
     )
     useJUnit()

@@ -1,61 +1,20 @@
 package com.burgess.schedule.ui.theme
 
 import androidx.compose.material3.Typography
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-// 大标题收紧字距、加大字重，正文保持系统默认字形，层级靠字号和灰度区分。
-val Typography = Typography(
-    headlineLarge = TextStyle(
-        fontWeight = FontWeight.Bold,
-        fontSize = 32.sp,
-        lineHeight = 40.sp,
-        letterSpacing = (-0.5).sp
-    ),
-    headlineSmall = TextStyle(
-        fontWeight = FontWeight.Bold,
-        fontSize = 22.sp,
-        lineHeight = 28.sp
-    ),
-    titleLarge = TextStyle(
-        fontWeight = FontWeight.Bold,
-        fontSize = 20.sp,
-        lineHeight = 26.sp
-    ),
-    titleMedium = TextStyle(
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 16.sp,
-        lineHeight = 22.sp
-    ),
-    bodyLarge = TextStyle(
-        fontWeight = FontWeight.Normal,
-        fontSize = 15.sp,
-        lineHeight = 24.sp
-    ),
-    bodyMedium = TextStyle(
-        fontWeight = FontWeight.Normal,
-        fontSize = 14.sp,
-        lineHeight = 22.sp
-    ),
-    bodySmall = TextStyle(
-        fontWeight = FontWeight.Normal,
-        fontSize = 12.sp,
-        lineHeight = 18.sp
-    ),
-    labelLarge = TextStyle(
-        fontWeight = FontWeight.Medium,
-        fontSize = 14.sp,
-        lineHeight = 20.sp
-    ),
-    labelMedium = TextStyle(
-        fontWeight = FontWeight.Medium,
-        fontSize = 12.sp,
-        lineHeight = 16.sp
-    ),
-    labelSmall = TextStyle(
-        fontWeight = FontWeight.Medium,
-        fontSize = 11.sp,
-        lineHeight = 14.sp
-    )
-)
+object AppType {
+    val title = style(34, 40, FontWeight.SemiBold, -.85f)
+    val sheetTitle = style(24, 30, FontWeight.SemiBold, -.48f)
+    val cardTitle = style(16, 22, FontWeight.SemiBold, -.16f)
+    val body = style(15, 21, FontWeight.Normal)
+    val caption = style(13, 18, FontWeight.Normal)
+    val cell: TextStyle @Composable get() = if (LocalConfiguration.current.screenWidthDp <= 360) style(11, 15, FontWeight.Medium) else style(12, 16, FontWeight.Medium)
+    val micro: TextStyle @Composable get() = if (LocalConfiguration.current.screenWidthDp <= 360) style(10, 13, FontWeight.Medium) else style(11, 14, FontWeight.Medium)
+    private fun style(size: Int, height: Int, weight: FontWeight, spacing: Float = 0f) = TextStyle(fontSize = size.sp, lineHeight = height.sp, fontWeight = weight, letterSpacing = spacing.sp, fontFeatureSettings = "tnum")
+}
+val Typography = Typography(headlineLarge = AppType.title, headlineMedium = AppType.sheetTitle, headlineSmall = AppType.sheetTitle, titleLarge = AppType.cardTitle, titleMedium = AppType.cardTitle, titleSmall = AppType.cardTitle, bodyLarge = AppType.body, bodyMedium = AppType.body, bodySmall = AppType.caption, labelLarge = AppType.caption, labelMedium = AppType.caption, labelSmall = AppType.caption)

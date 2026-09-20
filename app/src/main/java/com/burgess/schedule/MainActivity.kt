@@ -124,7 +124,7 @@ import com.burgess.schedule.notifications.TestNotificationResult
 import com.burgess.schedule.data.CourseEntity
 import com.burgess.schedule.pickup.CAINIAO_PACKAGE_PAGE_URL
 import com.burgess.schedule.pickup.PickupWebViewPanel
-import com.burgess.schedule.ui.theme.课程表Theme
+import com.burgess.schedule.ui.theme.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -176,15 +176,16 @@ private val periods = SchoolSchedule.periods.mapIndexed { index, period ->
     Period("第 ${index + 1} 节", period.startMinutes, period.endMinutes)
 }
 
-private val Ink = Color(0xFF0D0D0D)
-private val MutedInk = Color(0xFF68717C)
-private val FaintInk = Color(0xFF8B949E)
-private val Accent = Color(0xFF10A37F)
-private val AccentDeep = Color(0xFF087A5F)
-private val Gray50 = Color(0xFFFAFAFA)
-private val Gray100 = Color(0xFFF5F6F7)
-private val Hairline = Color(0xFFE8EAED)
-private val CourseSlotFill = Color(0xFFF2F7F4)
+private val Ink: Color @Composable get() = LocalAppColors.current.ink
+private val MutedInk: Color @Composable get() = LocalAppColors.current.mut
+private val FaintInk: Color @Composable get() = LocalAppColors.current.mut
+private val Accent: Color @Composable get() = LocalAppColors.current.ink
+private val AccentDeep: Color @Composable get() = LocalAppColors.current.ink
+private val Gray50: Color @Composable get() = LocalAppColors.current.bg
+private val Gray100: Color @Composable get() = LocalAppColors.current.bg
+private val Hairline: Color @Composable get() = LocalAppColors.current.line
+private val CourseSlotFill: Color @Composable get() = LocalAppColors.current.ink.copy(alpha = .035f)
+private val CardColor: Color @Composable get() = LocalAppColors.current.card
 
 private fun displayLocation(raw: String): String {
     val compact = raw
@@ -210,36 +211,11 @@ private fun Char.isLocationCjkOrDigit(): Boolean =
     isDigit() || this in '\u4E00'..'\u9FFF'
 
 // 课程用左侧细色条区分，色板保持饱和但不刺眼。
-private val courseAccentColors = listOf(
-    Color(0xFF10A37F),
-    Color(0xFF3978A8),
-    Color(0xFFB47716),
-    Color(0xFFC85B4D),
-    Color(0xFF6D8E58),
-    Color(0xFF65798E)
-)
-
-private val courseFillColors = listOf(
-    Color(0xFFE2F3ED),
-    Color(0xFFE5F0F8),
-    Color(0xFFFFF1D5),
-    Color(0xFFFCE6E2),
-    Color(0xFFE9F0E3),
-    Color(0xFFE9EEF3)
-)
-
-private fun courseAccentFor(id: Long): Color =
-    courseAccentColors[(((id % courseAccentColors.size) + courseAccentColors.size)).toInt() % courseAccentColors.size]
-
-private fun stableCoursePaletteIndex(course: Course): Int {
-    val identity = listOf(course.name, course.room, course.teacher)
-        .joinToString("|") { it.trim().lowercase(Locale.ROOT) }
-    return identity.hashCode().and(Int.MAX_VALUE) % courseFillColors.size
-}
-
-private fun courseFillFor(course: Course): Color = courseFillColors[stableCoursePaletteIndex(course)]
-
-private fun courseAccentFor(course: Course): Color = courseAccentColors[stableCoursePaletteIndex(course)]
+private val courseAccentColors = CoursePalette
+private fun courseAccentFor(id: Long): Color = CoursePalette[Math.floorMod(id, CoursePalette.size.toLong()).toInt()]
+private fun stableCoursePaletteIndex(course: Course): Int = Math.floorMod(course.color.toArgb(), CoursePalette.size)
+@Composable private fun courseFillFor(course: Course): Color = courseTint(courseAccentFor(course)).first
+private fun courseAccentFor(course: Course): Color = CoursePalette[stableCoursePaletteIndex(course)]
 
 private fun CourseEntity.toCourse(): Course {
     val safePeriod = period.coerceIn(0, periods.lastIndex)
@@ -338,6 +314,7 @@ private fun ScheduleApp(
     val courseEntities by courseDao.observeAll()
         .collectAsState(initial = null as List<CourseEntity>?)
     val courses = courseEntities?.map { it.toCourse() }.orEmpty()
+    var designVisible by remember { mutableStateOf(false) }
     var selectedPage by remember { mutableStateOf(0) }
     var expandedCourse by remember { mutableStateOf<Course?>(null) }
     var weekEditing by remember { mutableStateOf(false) }
@@ -639,7 +616,8 @@ private fun ScheduleApp(
                             today = today,
                             onReminderClick = { reminderVisible = true },
                             onPickupClick = { pickupVisible = true },
-                            onDevLogClick = { devLogVisible = true }
+                            onDevLogClick = { devLogVisible = true },
+                            onDesignClick = { designVisible = true }
                         )
                     }
                 }
@@ -720,6 +698,10 @@ private fun ScheduleApp(
         }
     }
 
+    if (designVisible && BuildConfig.DEBUG) {
+        Dialog(onDismissRequest = { designVisible = false }) { com.burgess.schedule.ui.components.DesignPreview() }
+    }
+
     if (editorVisible) {
         CourseEditorDialog(
             course = editingCourse,
@@ -789,7 +771,7 @@ private fun ScheduleApp(
                                 period = start,
                                 endPeriod = end,
                                 weekNumber = importWeekNumber,
-                                color = Accent
+                                color = CoursePalette.first()
                             )
                         }
                     }
@@ -895,7 +877,7 @@ private fun PickupScreen(
             Text(
                 text = "取件码",
                 style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.SemiBold,
                 color = Ink,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.weight(1f)
@@ -1051,7 +1033,7 @@ private fun PickupCodeCard(
                 Text(
                     text = entry.code,
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     color = if (entry.picked) FaintInk else Ink,
                     letterSpacing = 2.sp
                 )
@@ -1112,21 +1094,21 @@ private fun QuickPickupCodeOverlay(
                     cameraDistance = 12f * density
                 },
             shape = RoundedCornerShape(24.dp),
-            color = Color.White,
+            color = CardColor,
             tonalElevation = 8.dp
         ) {
             Column(modifier = Modifier.padding(24.dp)) {
                 Text(
                     text = "快捷取件码",
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     color = Ink
                 )
                 Spacer(modifier = Modifier.height(18.dp))
                 Text(
                     text = entry.code,
                     style = MaterialTheme.typography.headlineLarge,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     letterSpacing = 4.sp,
                     color = AccentDeep,
                     modifier = Modifier.fillMaxWidth(),
@@ -1471,7 +1453,7 @@ private fun DevLogScreen(onBack: () -> Unit) {
                 Text(
                     text = "开发日志",
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     color = Ink,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f)
@@ -1561,7 +1543,7 @@ private fun DevLogDetailScreen(entry: DevLogEntry, onBack: () -> Unit) {
             Text(
                 text = "V" + entry.version,
                 style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.SemiBold,
                 color = Ink,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.weight(1f)
@@ -1591,7 +1573,7 @@ private fun DevLogDetailScreen(entry: DevLogEntry, onBack: () -> Unit) {
                 Text(
                     text = section.title,
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     color = Ink
                 )
                 if (section.body.isNotBlank()) {
@@ -1633,13 +1615,15 @@ private fun MoreScreen(
     today: Calendar,
     onReminderClick: () -> Unit,
     onPickupClick: () -> Unit,
-    onDevLogClick: () -> Unit
+    onDevLogClick: () -> Unit,
+    onDesignClick: () -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
     ) {
+        if (BuildConfig.DEBUG) { TextButton(onClick = onDesignClick) { Text("设计预览") } }
         StaggeredReveal(0) {
             ScheduleHeader(
                 title = "更多",
@@ -1656,7 +1640,7 @@ private fun MoreScreen(
                 Text(
                     text = "课程表",
                     style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     color = Ink
                 )
                 Spacer(modifier = Modifier.height(8.dp))
@@ -1714,7 +1698,7 @@ private fun MoreScreen(
                         Text(
                             text = "Arihara",
                             style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.SemiBold,
                             color = Ink
                         )
                     }
@@ -1863,7 +1847,7 @@ private fun TodayHero(today: Calendar, courseCount: Int) {
             Text(
                 text = "今天",
                 style = MaterialTheme.typography.headlineLarge,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.SemiBold,
                 color = Ink
             )
             Spacer(modifier = Modifier.height(3.dp))
@@ -1895,7 +1879,7 @@ private fun TodayIntro(today: Calendar) {
         Text(
             text = "今天 · 星期" + weekDayLabels[currentDayIndex(today)],
             style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
+            fontWeight = FontWeight.SemiBold,
             color = Ink
         )
     }
@@ -1933,7 +1917,7 @@ private fun TodayCourseCard(course: Course, onClick: () -> Unit) {
                 Text(
                     text = course.name,
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     color = Ink
                 )
                 Spacer(modifier = Modifier.height(4.dp))
@@ -2084,7 +2068,7 @@ private fun WeekScreen(
 
 @Composable
 private fun AppBottomNavigation(selectedPage: Int, onPageSelected: (Int) -> Unit) {
-    Surface(color = Color.White) {
+    Surface(color = CardColor) {
         Column {
             HorizontalDivider(thickness = 1.dp, color = Hairline)
             Row(
@@ -2126,7 +2110,7 @@ private fun RowScope.NavigationItem(
         Text(
             text = icon,
             fontSize = 18.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
             color = if (selected) Ink else FaintInk
         )
         Spacer(modifier = Modifier.height(2.dp))
@@ -2150,7 +2134,7 @@ private fun RowScope.NavigationItem(
 @Composable
 private fun AppCard(
     modifier: Modifier = Modifier,
-    color: Color = Color.White,
+    color: Color = CardColor,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val shape = RoundedCornerShape(14.dp)
@@ -2235,7 +2219,7 @@ private fun ExpandedCourseOverlay(course: Course, onDismiss: () -> Unit) {
                         onClick = {}
                     ),
                 shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                color = Color.White,
+                color = CardColor,
                 contentColor = Ink,
                 tonalElevation = 0.dp,
                 shadowElevation = 16.dp
@@ -2264,7 +2248,7 @@ private fun ExpandedCourseOverlay(course: Course, onDismiss: () -> Unit) {
                     Text(
                         text = course.name,
                         style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.SemiBold,
                         color = Ink
                     )
                     Spacer(modifier = Modifier.height(14.dp))
@@ -2288,7 +2272,7 @@ private fun ExpandedCourseOverlay(course: Course, onDismiss: () -> Unit) {
                     Text(
                         text = displayLocation(course.room).ifBlank { "地点待确认" },
                         style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.SemiBold,
                         color = Ink
                     )
                     if (course.teacher.isNotBlank()) {
@@ -2400,7 +2384,7 @@ private fun OcrPreviewDialog(
                 Text(
                     text = "截图识别预览",
                     style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.SemiBold
                 )
                 Text(
                     text = "确认后仅替换目标周，不会改动其他周课程。",
@@ -2490,7 +2474,7 @@ private fun OcrPreviewDialog(
                     },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Ink,
-                        contentColor = Color.White
+                        contentColor = CardColor
                     ),
                     shape = RoundedCornerShape(14.dp)
                 ) {
@@ -2523,7 +2507,7 @@ private fun ScheduleHeader(
             Text(
                 text = title,
                 style = MaterialTheme.typography.headlineLarge,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.SemiBold,
                 color = Ink
             )
             Spacer(modifier = Modifier.height(4.dp))
@@ -2573,7 +2557,7 @@ private fun PillButton(text: String, filled: Boolean, onClick: () -> Unit) {
             text = text,
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.SemiBold,
-            color = if (filled) Color.White else Ink
+            color = if (filled) CardColor else Ink
         )
     }
 }
@@ -2731,8 +2715,8 @@ private fun NextCourseCard(
             .padding(horizontal = 16.dp, vertical = 6.dp)
             .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
             .clip(shape)
-            .background(Color(0xFFF1F7F3))
-            .border(1.dp, Color(0xFFDCEBE3), shape)
+            .background(CardColor)
+            .border(1.dp, Hairline, shape)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
@@ -2979,7 +2963,7 @@ private fun DayHeader(
                 .padding(horizontal = 12.dp, vertical = 5.dp),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = if (isToday) FontWeight.SemiBold else FontWeight.Medium,
-            color = if (isToday) Color.White else MutedInk
+            color = if (isToday) CardColor else MutedInk
         )
     }
 }
@@ -3016,8 +3000,8 @@ private fun CourseSlot(
             .clip(shape)
             .background(
                 when {
-                    course != null -> if (isFocus) Color(0xFFEEF6F1) else CourseSlotFill
-                    editMode -> Color.White
+                    course != null -> if (isFocus) CourseSlotFill else CourseSlotFill
+                    editMode -> CardColor
                     else -> Color.Transparent
                 }
             )
@@ -3080,7 +3064,7 @@ private fun CourseSlot(
                             overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall.copy(lineHeight = 15.sp),
                             fontWeight = FontWeight.Medium,
-                            color = Color(0xFF35424A)
+                            color = Ink
                         )
                     }
                 }
@@ -3093,7 +3077,7 @@ private fun CourseSlot(
 private fun scheduleOutlinedFieldColors() = OutlinedTextFieldDefaults.colors(
     focusedTextColor = Ink,
     unfocusedTextColor = Ink,
-    focusedContainerColor = Color.White,
+    focusedContainerColor = CardColor,
     unfocusedContainerColor = Gray50,
     focusedBorderColor = Ink,
     unfocusedBorderColor = MaterialTheme.colorScheme.outline,
@@ -3151,7 +3135,7 @@ private fun CourseEditorDialog(
                 Text(
                     text = if (course == null) "添加课程" else "编辑课程",
                     style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.SemiBold
                 )
                 Text(
                     text = if (course == null) "把今天的安排记下来" else "更新课程信息与上课位置",
@@ -3328,7 +3312,7 @@ private fun CourseEditorDialog(
                 },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Ink,
-                    contentColor = Color.White
+                    contentColor = CardColor
                 ),
                 shape = RoundedCornerShape(14.dp)
             ) {
