@@ -117,6 +117,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -155,6 +156,13 @@ import com.burgess.schedule.ui.components.CourseTransitionHost
 import com.burgess.schedule.ui.components.CourseDetail
 import com.burgess.schedule.ui.components.CourseSource
 import com.burgess.schedule.ui.components.courseTitle
+import com.burgess.schedule.ui.morph.MorphController
+import com.burgess.schedule.ui.morph.MorphDetails
+import com.burgess.schedule.ui.morph.MorphExitAction
+import com.burgess.schedule.ui.morph.MorphHost
+import com.burgess.schedule.ui.morph.MorphSource
+import com.burgess.schedule.ui.morph.MorphSourceStyle
+import com.burgess.schedule.ui.morph.rememberMorphController
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
@@ -350,6 +358,8 @@ private fun ScheduleApp(
     var designVisible by remember { mutableStateOf(false) }
     var selectedPage by remember { mutableStateOf(0) }
     var expandedCourse by remember { mutableStateOf<Course?>(null) }
+    var morphShowingToday by remember { mutableStateOf(false) }
+    val morphController = rememberMorphController()
     var weekEditing by remember { mutableStateOf(false) }
     var weekOffset by remember { mutableStateOf(0) }
     var editorVisible by remember { mutableStateOf(false) }
@@ -550,6 +560,28 @@ private fun ScheduleApp(
         editorVisible = false
     }
 
+    fun deleteCourseWithUndo(removed: Course) {
+        scope.launch {
+            courseDao.delete(removed.toEntity())
+            val result = withTimeoutOrNull(5_000L) {
+                snackbarHostState.showSnackbar("已删除", "撤销", duration = SnackbarDuration.Indefinite)
+            }
+            if (result == SnackbarResult.ActionPerformed) courseDao.upsert(removed.toEntity())
+        }
+    }
+
+    fun finishTodayMorph(action: MorphExitAction) {
+        if (!morphShowingToday) return
+        val selected = expandedCourse
+        when (action) {
+            MorphExitAction.Close -> Unit
+            MorphExitAction.Edit -> selected?.let { openEditor(course = it) }
+            MorphExitAction.Delete -> selected?.let { deleteCourseWithUndo(it) }
+        }
+        morphShowingToday = false
+        expandedCourse = null
+    }
+
     val copyNextWeek: (Int, List<Course>) -> Unit = { sourceWeekNumber, source ->
                                 val targetWeekNumber = sourceWeekNumber + 1
                                 val existingKeys = courses
@@ -580,18 +612,18 @@ private fun ScheduleApp(
                                 }
                             }
 
+    MorphHost(
+        controller = morphController,
+        onExitFinished = ::finishTodayMorph
+    ) {
     CourseTransitionHost(
-        detail = expandedCourse?.let { CourseDetail(it.id, it.name, periodTimeRange(it), "周${weekDayLabels[it.dayIndex]} · ${periodRangeLabel(it)}", it.room, courseAccentFor(it)) },
+        detail = expandedCourse?.takeUnless { morphShowingToday }?.let { CourseDetail(it.id, it.name, periodTimeRange(it), "周${weekDayLabels[it.dayIndex]} · ${periodRangeLabel(it)}", it.room, courseAccentFor(it)) },
         onDismiss = { expandedCourse = null },
         onEdit = { expandedCourse?.let { openEditor(course = it) }; expandedCourse = null },
         onDelete = {
             expandedCourse?.let { removed ->
                 expandedCourse = null
-                scope.launch {
-                    courseDao.delete(removed.toEntity())
-                    val result = withTimeoutOrNull(5_000L) { snackbarHostState.showSnackbar("已删除", "撤销", duration = SnackbarDuration.Indefinite) }
-                    if (result == SnackbarResult.ActionPerformed) courseDao.upsert(removed.toEntity())
-                }
+                deleteCourseWithUndo(removed)
             }
         }
     ) {
@@ -647,7 +679,11 @@ private fun ScheduleApp(
                             pendingPickups = pendingPickups,
                             onPickupOpen = { quickPickupEntry = it },
                             onPickupCopy = { copyPickupCode(it) },
-                            onCourseClick = { expandedCourse = it },
+                            morphController = morphController,
+                            onCourseClick = { course ->
+                                expandedCourse = course
+                                morphShowingToday = true
+                            },
                             onImport = { openImport(currentWeekNumber) },
                             onAdd = { openEditor(dayIndex = currentDayIndex(today), periodIndex = 0, weekNumber = currentWeekNumber) }
                         )
@@ -757,6 +793,8 @@ private fun ScheduleApp(
             }
         }
         }
+    }
+
     }
 
     }
@@ -1547,13 +1585,15 @@ private fun TodayScreen(
     today: Calendar, courses: List<Course>, focus: FocusCourse?,
     pendingPickups: List<PickupCodeEntity>, onPickupOpen: (PickupCodeEntity) -> Unit,
     onPickupCopy: (String) -> Unit, onCourseClick: (Course) -> Unit,
-    onImport: () -> Unit, onAdd: () -> Unit
+    onImport: () -> Unit, onAdd: () -> Unit,
+    morphController: MorphController? = null
 ) {
     val start = today.cloneCalendar().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
     val tomorrow = start.cloneCalendar().apply { add(Calendar.DAY_OF_YEAR, 1) }
     val timed = remember(courses) { courses.map { it.timedLesson() } }
     val state = timelineState(timed, today.timeInMillis, start.timeInMillis, tomorrow.timeInMillis)
     val byId = remember(courses) { courses.associateBy { it.id } }
+    val timelineWidth = AppSpace.timeline * LocalDensity.current.fontScale.coerceAtLeast(1f)
     val header: @Composable () -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -1584,11 +1624,15 @@ private fun TodayScreen(
             key(lesson.id) {
                 byId[lesson.id]?.let { course ->
                     Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
-                        Column(Modifier.width(AppSpace.timeline)) {
+                        Column(Modifier.width(timelineWidth)) {
                             Text(SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(lesson.start)), style = AppType.caption, fontWeight = FontWeight.Medium, color = Ink)
                             Text(SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(lesson.end)), style = AppType.caption, color = MutedInk)
                         }
-                        TimelineCourseCard(course, lesson, today.timeInMillis, state.focus?.id == lesson.id, Modifier.weight(1f), onCourseClick)
+                        TimelineCourseCard(
+                            course, lesson, today.timeInMillis, state.focus?.id == lesson.id,
+                            Modifier.weight(1f), onCourseClick, morphController = morphController,
+                            sourceRole = "timeline"
+                        )
                     }
                 }
             }
@@ -1600,12 +1644,21 @@ private fun TodayScreen(
                 val dayLabel = if (next.start < tomorrow.cloneCalendar().apply { add(Calendar.DAY_OF_YEAR, 1) }.timeInMillis) "明天" else "${nextDate.get(Calendar.MONTH) + 1}月${nextDate.get(Calendar.DAY_OF_MONTH)}日"
                 if (state.state == DayState.FINISHED) SectionLabel(dayLabel)
                 byId[next.id]?.let { course ->
-                    TimelineCourseCard(course, next, today.timeInMillis, true, Modifier.fillMaxWidth(), onCourseClick, "$dayLabel ${SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(next.start))}", true)
+                    TimelineCourseCard(
+                        course, next, today.timeInMillis, true, Modifier.fillMaxWidth(), onCourseClick,
+                        "$dayLabel ${SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(next.start))}", true,
+                        morphController, "next"
+                    )
                 }
                 val nextDayEnd = nextDate.cloneCalendar().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); add(Calendar.DAY_OF_YEAR, 1) }.timeInMillis
                 val rest = remainingPreviewLessons(timed, next, nextDayEnd)
                 if (rest.isNotEmpty()) SectionLabel("${dayLabel}还有 ${rest.size} 节课")
-                rest.forEach { lesson -> byId[lesson.id]?.let { TimelineCourseCard(it, lesson, today.timeInMillis, false, Modifier.fillMaxWidth(), onCourseClick) } }
+                rest.forEach { lesson -> byId[lesson.id]?.let {
+                    TimelineCourseCard(
+                        it, lesson, today.timeInMillis, false, Modifier.fillMaxWidth(), onCourseClick,
+                        morphController = morphController, sourceRole = "preview"
+                    )
+                } }
             } ?: if (state.state != DayState.EMPTY) SectionLabel("暂时没有后续课程，可到周视图添加或导入。") else Unit
         }
         if (pendingPickups.isNotEmpty()) PickupBriefCard(pendingPickups, onPickupOpen, onPickupCopy)
@@ -1613,41 +1666,136 @@ private fun TodayScreen(
 }
 
 @Composable
-private fun TimelineCourseCard(course: Course, lesson: TimedLesson, now: Long, highlighted: Boolean, modifier: Modifier, onClick: (Course) -> Unit, dateLabel: String = "", large: Boolean = false) {
+private fun TimelineCourseCard(
+    course: Course,
+    lesson: TimedLesson,
+    now: Long,
+    highlighted: Boolean,
+    modifier: Modifier,
+    onClick: (Course) -> Unit,
+    dateLabel: String = "",
+    large: Boolean = false,
+    morphController: MorphController? = null,
+    sourceRole: String = "today"
+) {
     val active = now >= lesson.start && now < lesson.end
     val ended = now >= lesson.end
     val c = LocalAppColors.current
-    val content: @Composable ColumnScope.() -> Unit = {
-        if (highlighted) {
-            Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gridGap), verticalAlignment = Alignment.CenterVertically) {
-                if (active) Box(Modifier.size(AppSpace.cellVertical).background(c.live, AppShape.pill))
-                Text((if (active) "进行中" else "下一节") + " · " +
-                    if (dateLabel.isEmpty()) countdown(if (active) lesson.end - now else lesson.start - now, active) else dateLabel,
-                    style = AppType.caption, color = c.onInk)
-            }
-            if (dateLabel.isNotEmpty()) {
-                Text(countdown(lesson.start - now), style = AppType.caption, color = c.onInk)
-            }
-            Spacer(Modifier.height(AppSpace.gap))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gridGap), verticalAlignment = Alignment.CenterVertically) {
-            if (!highlighted) Box(Modifier.size(AppSpace.cellVertical).background(courseAccentFor(course).copy(alpha = if (ended) .5f else 1f), AppShape.pill))
-            Text(course.name, modifier = Modifier.courseTitle(course.id), style = if (large) AppType.sheetTitle else AppType.cardTitle, color = if (highlighted) c.onInk else if (ended) c.mut else c.ink)
-        }
-        Text(periodRangeLabel(course) + " · " + displayLocation(course.room).ifBlank { "未填写" }, style = AppType.caption, color = if (highlighted) c.onInk else c.mut)
-        if (active && highlighted) {
-            val entry = remember(course.id) { androidx.compose.animation.core.Animatable(0f) }
-            LaunchedEffect(course.id) { entry.animateTo(1f, tween(Motion.ProgressBarMs, easing = Motion.EmphasizedDecelerate)) }
-            Spacer(Modifier.height(AppSpace.gap))
-            LinearProgressIndicator(
-                progress = { lessonProgress(lesson, now) * entry.value },
-                modifier = Modifier.fillMaxWidth().height(AppSpace.progress), color = c.onInk, trackColor = c.onInk.copy(alpha = .15f)
-            )
+    val entry = if (active && highlighted) {
+        remember(course.id, lesson.id) { androidx.compose.animation.core.Animatable(0f) }
+    } else {
+        null
+    }
+    if (entry != null) {
+        LaunchedEffect(course.id, lesson.id) {
+            entry.animateTo(1f, tween(Motion.ProgressBarMs, easing = Motion.EmphasizedDecelerate))
         }
     }
-    CourseSource(course.id, modifier) {
-        if (highlighted) InkCard(Modifier.fillMaxWidth(), onClick = { onClick(course) }, content = content)
-        else com.burgess.schedule.ui.components.AppCard(Modifier.fillMaxWidth(), onClick = { onClick(course) }, content = content)
+    val body: @Composable ColumnScope.(Color?, @Composable (String, TextStyle, Color) -> Unit) -> Unit = { foregroundOverride, renderTitle ->
+        TimelineCourseBody(
+            course = course,
+            lesson = lesson,
+            now = now,
+            highlighted = highlighted,
+            dateLabel = dateLabel,
+            large = large,
+            entryProgress = { entry?.value ?: 0f },
+            foregroundOverride = foregroundOverride,
+            renderTitle = renderTitle
+        )
+    }
+    if (morphController == null) {
+        CourseSource(course.id, modifier) {
+            if (highlighted) {
+                InkCard(Modifier.fillMaxWidth(), onClick = { onClick(course) }) {
+                    body(null) { text, style, color ->
+                        Text(text, Modifier.courseTitle(course.id), style = style, color = color)
+                    }
+                }
+            } else {
+                com.burgess.schedule.ui.components.AppCard(Modifier.fillMaxWidth(), onClick = { onClick(course) }) {
+                    body(null) { text, style, color ->
+                        Text(text, Modifier.courseTitle(course.id), style = style, color = color)
+                    }
+                }
+            }
+        }
+    } else {
+        val sourceForeground = if (highlighted) c.onInk else if (ended) c.mut else c.ink
+        val sourceStyle = MorphSourceStyle(
+            fill = if (highlighted) c.ink else c.card,
+            cornerRadius = if (highlighted) AppSpace.heroRadius else AppSpace.cardRadius,
+            foreground = sourceForeground,
+            outline = if (highlighted) Color.Transparent else c.line,
+            outlineWidth = if (highlighted) 0.dp else AppSpace.line
+        )
+        val sourceKey = "today-$sourceRole-${course.id}-" + SimpleDateFormat("yyyyMMdd", Locale.CHINA).format(Date(lesson.start))
+        MorphSource(
+            controller = morphController,
+            instanceKey = sourceKey,
+            details = MorphDetails(
+                id = course.id,
+                title = course.name,
+                periods = "周${weekDayLabels[course.dayIndex]} · ${periodRangeLabel(course)}",
+                time = periodTimeRange(course),
+                room = course.room,
+                hue = courseAccentFor(course)
+            ),
+            style = sourceStyle,
+            modifier = modifier,
+            onOpen = { onClick(course) }
+        ) { foregroundOverride ->
+            Column(
+                Modifier.fillMaxSize().padding(if (highlighted) AppSpace.hero else AppSpace.card)
+            ) {
+                body(foregroundOverride) { text, style, color ->
+                    Title(text, style, color)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ColumnScope.TimelineCourseBody(
+    course: Course,
+    lesson: TimedLesson,
+    now: Long,
+    highlighted: Boolean,
+    dateLabel: String,
+    large: Boolean,
+    entryProgress: () -> Float,
+    foregroundOverride: Color?,
+    renderTitle: @Composable (String, TextStyle, Color) -> Unit
+) {
+    val active = now >= lesson.start && now < lesson.end
+    val ended = now >= lesson.end
+    val c = LocalAppColors.current
+    val foreground = foregroundOverride ?: if (highlighted) c.onInk else if (ended) c.mut else c.ink
+    val metadata = foregroundOverride?.copy(alpha = .78f) ?: if (highlighted) c.onInk else c.mut
+    if (highlighted) {
+        Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gridGap), verticalAlignment = Alignment.CenterVertically) {
+            if (active) Box(Modifier.size(AppSpace.cellVertical).background(c.live, AppShape.pill))
+            Text((if (active) "进行中" else "下一节") + " · " +
+                if (dateLabel.isEmpty()) countdown(if (active) lesson.end - now else lesson.start - now, active) else dateLabel,
+                style = AppType.caption, color = foreground)
+        }
+        if (dateLabel.isNotEmpty()) {
+            Text(countdown(lesson.start - now), style = AppType.caption, color = foreground)
+        }
+        Spacer(Modifier.height(AppSpace.gap))
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gridGap), verticalAlignment = Alignment.CenterVertically) {
+        if (!highlighted) Box(Modifier.size(AppSpace.cellVertical).background(courseAccentFor(course).copy(alpha = if (ended) .5f else 1f), AppShape.pill))
+        renderTitle(course.name, if (large) AppType.sheetTitle else AppType.cardTitle, foreground)
+    }
+    Text(periodRangeLabel(course) + " · " + displayLocation(course.room).ifBlank { "未填写" }, style = AppType.caption, color = metadata)
+    if (active && highlighted) {
+        Spacer(Modifier.height(AppSpace.gap))
+        LinearProgressIndicator(
+            progress = { lessonProgress(lesson, now) * entryProgress() },
+            modifier = Modifier.fillMaxWidth().height(AppSpace.progress), color = foreground, trackColor = foreground.copy(alpha = .15f)
+        )
     }
 }
 
