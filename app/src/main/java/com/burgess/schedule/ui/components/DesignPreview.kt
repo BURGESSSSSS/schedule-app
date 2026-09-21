@@ -7,8 +7,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.view.WindowCompat
 import com.burgess.schedule.BuildConfig
 import com.burgess.schedule.R
 import com.burgess.schedule.ui.theme.*
@@ -21,6 +25,29 @@ fun DesignPreview(onClose: (() -> Unit)? = null) {
     var sheet by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("点击下方组件，检查按压反馈") }
     val c = LocalAppColors.current
+    val view = LocalView.current
+    val dialogWindow = (view.parent as? DialogWindowProvider)?.window
+    val darkBackground = c.bg.luminance() < .5f
+    DisposableEffect(dialogWindow, darkBackground) {
+        if (dialogWindow == null) return@DisposableEffect onDispose { }
+        val controller = WindowCompat.getInsetsController(dialogWindow, view)
+        val previousStatusBars = controller.isAppearanceLightStatusBars
+        val previousNavigationBars = controller.isAppearanceLightNavigationBars
+        controller.isAppearanceLightStatusBars = !darkBackground
+        controller.isAppearanceLightNavigationBars = !darkBackground
+        onDispose {
+            controller.isAppearanceLightStatusBars = previousStatusBars
+            controller.isAppearanceLightNavigationBars = previousNavigationBars
+        }
+    }
+    var weekSample by remember { mutableStateOf(false) }
+    if (weekSample) {
+        Column(Modifier.fillMaxSize().background(c.bg).safeDrawingPadding()) {
+            PillButton("返回组件预览", { weekSample = false }, PillStyle.Ghost, small = true)
+            com.burgess.schedule.WeekGridSandbox()
+        }
+        return
+    }
     Column(
         Modifier.fillMaxSize().background(c.bg).safeDrawingPadding()
             .verticalScroll(rememberScrollState()).padding(AppSpace.page),
@@ -29,6 +56,7 @@ fun DesignPreview(onClose: (() -> Unit)? = null) {
         if (onClose != null) CircleIconButton(R.drawable.symbol_chevron_left, "关闭设计预览", onClose)
         Text("设计预览", style = AppType.title, color = c.ink)
         SectionLabel("基础组件 · 假数据，不会修改课程")
+        PillButton("周视图假数据", { weekSample = true }, PillStyle.Ghost, small = true)
         Text("Inter 08:00 – 11:40", style = AppType.sheetTitle, color = c.ink)
         SectionLabel("中文使用系统字体，时间数字等宽")
         AppCard(Modifier.fillMaxWidth(), onClick = { message = "普通卡片：按下缩小至 98%" }) {
