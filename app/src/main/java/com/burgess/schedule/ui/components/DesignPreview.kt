@@ -16,6 +16,7 @@ import androidx.core.view.WindowCompat
 import com.burgess.schedule.BuildConfig
 import com.burgess.schedule.R
 import com.burgess.schedule.ui.theme.*
+import com.burgess.schedule.ui.morph.MorphSandbox
 
 /** Debug entry only. Samples have local fake state and never touch course data. */
 @Composable
@@ -41,11 +42,16 @@ fun DesignPreview(onClose: (() -> Unit)? = null) {
         }
     }
     var weekSample by remember { mutableStateOf(false) }
+    var morphSample by remember { mutableStateOf(false) }
     if (weekSample) {
         Column(Modifier.fillMaxSize().background(c.bg).safeDrawingPadding()) {
             PillButton("返回组件预览", { weekSample = false }, PillStyle.Ghost, small = true)
             com.burgess.schedule.WeekGridSandbox()
         }
+        return
+    }
+    if (morphSample) {
+        MorphSandbox(onClose = { morphSample = false })
         return
     }
     Column(
@@ -57,6 +63,7 @@ fun DesignPreview(onClose: (() -> Unit)? = null) {
         Text("设计预览", style = AppType.title, color = c.ink)
         SectionLabel("基础组件 · 假数据，不会修改课程")
         PillButton("周视图假数据", { weekSample = true }, PillStyle.Ghost, small = true)
+        PillButton("详情转场假数据", { morphSample = true }, PillStyle.Ghost, small = true)
         Text("Inter 08:00 – 11:40", style = AppType.sheetTitle, color = c.ink)
         SectionLabel("中文使用系统字体，时间数字等宽")
         AppCard(Modifier.fillMaxWidth(), onClick = { message = "普通卡片：按下缩小至 98%" }) {
@@ -93,7 +100,7 @@ fun DesignPreview(onClose: (() -> Unit)? = null) {
             val (background, foreground) = courseTint(hue, c)
             Text("课程 ${index + 1} · Node.js · 08:00", Modifier.fillMaxWidth().background(background, AppShape.cell).padding(AppSpace.card), style = AppType.body, color = foreground)
         }
-        SectionLabel("详情形变将在阶段 5 先接入此预览页。")
+        SectionLabel("详情转场原型已在上方入口开放，数据不会写入课程表。")
     }
     if (sheet) BottomSheetContainer({ sheet = false }) {
         Text("基础弹窗", style = AppType.sheetTitle, color = c.ink)
