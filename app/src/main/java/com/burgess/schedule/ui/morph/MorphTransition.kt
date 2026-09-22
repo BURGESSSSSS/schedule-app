@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import androidx.compose.animation.core.Animatable
@@ -119,7 +120,9 @@ data class MorphTitleSnapshot(
     val maxLines: Int,
     val firstLineHeight: Float,
     val firstLineEnd: Int,
-    val lineCount: Int
+    val lineCount: Int,
+    val softWrap: Boolean = true,
+    val overflow: TextOverflow = TextOverflow.Clip
 )
 
 @Immutable
@@ -147,7 +150,9 @@ class MorphSourceContentScope internal constructor(
         style: TextStyle,
         color: Color,
         modifier: Modifier = Modifier,
-        maxLines: Int = Int.MAX_VALUE
+        maxLines: Int = Int.MAX_VALUE,
+        softWrap: Boolean = true,
+        overflow: TextOverflow = TextOverflow.Clip
     ) {
         if (LocalMorphRenderPass.current == MorphRenderPass.Overlay) {
             val snapshot = LocalMorphTitleSnapshot.current
@@ -168,7 +173,9 @@ class MorphSourceContentScope internal constructor(
                             .clearAndSetSemantics { hideFromAccessibility() },
                         style = snapshot.style,
                         color = color,
-                        maxLines = snapshot.maxLines
+                        maxLines = snapshot.maxLines,
+                        softWrap = snapshot.softWrap,
+                        overflow = snapshot.overflow
                     )
                 } else {
                     Box(
@@ -204,7 +211,9 @@ class MorphSourceContentScope internal constructor(
                         maxLines,
                         firstLineHeight.coerceAtLeast(currentBounds.height),
                         firstLineEnd,
-                        lineCount
+                        lineCount,
+                        softWrap,
+                        overflow
                     )
                 )
             }
@@ -224,6 +233,8 @@ class MorphSourceContentScope internal constructor(
                 style = style,
                 color = color,
                 maxLines = maxLines,
+                softWrap = softWrap,
+                overflow = overflow,
                 onTextLayout = { result ->
                     firstBaseline = result.firstBaseline
                     firstLineHeight = result.getLineBottom(0)

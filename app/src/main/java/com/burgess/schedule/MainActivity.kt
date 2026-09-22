@@ -152,10 +152,6 @@ import com.burgess.schedule.ui.components.SectionLabel
 import androidx.compose.runtime.key
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.LinearProgressIndicator
-import com.burgess.schedule.ui.components.CourseTransitionHost
-import com.burgess.schedule.ui.components.CourseDetail
-import com.burgess.schedule.ui.components.CourseSource
-import com.burgess.schedule.ui.components.courseTitle
 import com.burgess.schedule.ui.morph.MorphController
 import com.burgess.schedule.ui.morph.MorphDetails
 import com.burgess.schedule.ui.morph.MorphExitAction
@@ -358,7 +354,6 @@ private fun ScheduleApp(
     var designVisible by remember { mutableStateOf(false) }
     var selectedPage by remember { mutableStateOf(0) }
     var expandedCourse by remember { mutableStateOf<Course?>(null) }
-    var morphShowingToday by remember { mutableStateOf(false) }
     val morphController = rememberMorphController()
     var weekEditing by remember { mutableStateOf(false) }
     var weekOffset by remember { mutableStateOf(0) }
@@ -570,15 +565,13 @@ private fun ScheduleApp(
         }
     }
 
-    fun finishTodayMorph(action: MorphExitAction) {
-        if (!morphShowingToday) return
+    fun finishCourseMorph(action: MorphExitAction) {
         val selected = expandedCourse
         when (action) {
             MorphExitAction.Close -> Unit
             MorphExitAction.Edit -> selected?.let { openEditor(course = it) }
             MorphExitAction.Delete -> selected?.let { deleteCourseWithUndo(it) }
         }
-        morphShowingToday = false
         expandedCourse = null
     }
 
@@ -614,18 +607,7 @@ private fun ScheduleApp(
 
     MorphHost(
         controller = morphController,
-        onExitFinished = ::finishTodayMorph
-    ) {
-    CourseTransitionHost(
-        detail = expandedCourse?.takeUnless { morphShowingToday }?.let { CourseDetail(it.id, it.name, periodTimeRange(it), "周${weekDayLabels[it.dayIndex]} · ${periodRangeLabel(it)}", it.room, courseAccentFor(it)) },
-        onDismiss = { expandedCourse = null },
-        onEdit = { expandedCourse?.let { openEditor(course = it) }; expandedCourse = null },
-        onDelete = {
-            expandedCourse?.let { removed ->
-                expandedCourse = null
-                deleteCourseWithUndo(removed)
-            }
-        }
+        onExitFinished = ::finishCourseMorph
     ) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -680,10 +662,7 @@ private fun ScheduleApp(
                             onPickupOpen = { quickPickupEntry = it },
                             onPickupCopy = { copyPickupCode(it) },
                             morphController = morphController,
-                            onCourseClick = { course ->
-                                expandedCourse = course
-                                morphShowingToday = true
-                            },
+                            onCourseClick = { course -> expandedCourse = course },
                             onImport = { openImport(currentWeekNumber) },
                             onAdd = { openEditor(dayIndex = currentDayIndex(today), periodIndex = 0, weekNumber = currentWeekNumber) }
                         )
@@ -709,7 +688,8 @@ private fun ScheduleApp(
                             },
                             onEditCourse = { course -> openEditor(course = course) },
                             onCopyNextWeek = copyNextWeek,
-                            onCourseClick = { expandedCourse = it }
+                            morphController = morphController,
+                            onCourseClick = { course -> expandedCourse = course }
                         )
                         else -> MoreScreen(
                             today = today,
@@ -793,8 +773,6 @@ private fun ScheduleApp(
             }
         }
         }
-    }
-
     }
 
     }
@@ -1705,18 +1683,16 @@ private fun TimelineCourseCard(
         )
     }
     if (morphController == null) {
-        CourseSource(course.id, modifier) {
-            if (highlighted) {
-                InkCard(Modifier.fillMaxWidth(), onClick = { onClick(course) }) {
-                    body(null) { text, style, color ->
-                        Text(text, Modifier.courseTitle(course.id), style = style, color = color)
-                    }
+        if (highlighted) {
+            InkCard(Modifier.fillMaxWidth(), onClick = { onClick(course) }) {
+                body(null) { text, style, color ->
+                    Text(text, style = style, color = color)
                 }
-            } else {
-                com.burgess.schedule.ui.components.AppCard(Modifier.fillMaxWidth(), onClick = { onClick(course) }) {
-                    body(null) { text, style, color ->
-                        Text(text, Modifier.courseTitle(course.id), style = style, color = color)
-                    }
+            }
+        } else {
+            com.burgess.schedule.ui.components.AppCard(Modifier.fillMaxWidth(), onClick = { onClick(course) }) {
+                body(null) { text, style, color ->
+                    Text(text, style = style, color = color)
                 }
             }
         }
@@ -1819,7 +1795,8 @@ private fun WeekScreen(
     onAddCourse: (Int, Int, Int) -> Unit,
     onEditCourse: (Course) -> Unit,
     onCopyNextWeek: (Int, List<Course>) -> Unit,
-    onCourseClick: (Course) -> Unit
+    onCourseClick: (Course) -> Unit,
+    morphController: MorphController? = null
 ) {
     val weekNumber = scheduleWeekNumber(selectedWeekStart)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = AppSpace.weekPage, vertical = AppSpace.page), verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
@@ -1838,7 +1815,7 @@ private fun WeekScreen(
             com.burgess.schedule.ui.components.PillButton("复制到下周", { onCopyNextWeek(weekNumber, courses) }, com.burgess.schedule.ui.components.PillStyle.Ghost, true)
         }
         if (courses.isEmpty()) SectionLabel(if (editing) "点击空白时段添加课程。" else "本周还没有课程，点击编辑或导入开始。")
-        ScheduleGrid(today, courses, focus, weekOffset, editing, AppSpace.gridRow, { day, period -> onAddCourse(weekNumber, day, period) }, onEditCourse, onCourseClick)
+        ScheduleGrid(today, courses, focus, weekOffset, editing, AppSpace.gridRow, { day, period -> onAddCourse(weekNumber, day, period) }, onEditCourse, onCourseClick, morphController)
     }
 }
 
@@ -2109,7 +2086,7 @@ private fun ReminderDialog(
 
 
 @Composable
-private fun ScheduleGrid(today: Calendar, courses: List<Course>, focus: FocusCourse?, selectedWeekOffset: Int, editMode: Boolean, rowHeight: Dp, onAddCourse: (Int, Int) -> Unit, onEditCourse: (Course) -> Unit, onCourseClick: (Course) -> Unit) {
+private fun ScheduleGrid(today: Calendar, courses: List<Course>, focus: FocusCourse?, selectedWeekOffset: Int, editMode: Boolean, rowHeight: Dp, onAddCourse: (Int, Int) -> Unit, onEditCourse: (Course) -> Unit, onCourseClick: (Course) -> Unit, morphController: MorphController? = null) {
     val hasWeekend = courses.any { it.dayIndex >= 5 }
     val scroll = rememberScrollState()
     val scope = rememberCoroutineScope()
@@ -2157,12 +2134,12 @@ private fun ScheduleGrid(today: Calendar, courses: List<Course>, focus: FocusCou
                             val slotHeight = blocks.fold(0.dp) { sum, block -> sum + blockHeight(block) } + AppSpace.gridGap * (blocks.count() - 1)
                             val slotCourses = cluster?.ids?.mapNotNull { byId[it] }.orEmpty()
                             if (slotCourses.isEmpty()) {
-                                CourseSlot(null, false, false, editMode, width, slotHeight) { if (editMode) onAddCourse(day, current) }
+                                CourseSlot(null, false, false, editMode, width, slotHeight, morphController = morphController) { if (editMode) onAddCourse(day, current) }
                             } else {
                                 Column(Modifier.width(width).height(slotHeight), verticalArrangement = Arrangement.spacedBy(AppSpace.gridGap)) {
                                     val courseHeight = (slotHeight - AppSpace.gridGap * (slotCourses.size - 1)) / slotCourses.size
                                     slotCourses.forEach { course -> key(course.id) {
-                                        CourseSlot(course, focus?.course?.id == course.id, focus?.isInProgress == true && focus.course.id == course.id, editMode, width, courseHeight, showPeriodRange = slotCourses.size > 1) {
+                                        CourseSlot(course, focus?.course?.id == course.id, focus?.isInProgress == true && focus.course.id == course.id, editMode, width, courseHeight, showPeriodRange = slotCourses.size > 1, morphController = morphController) {
                                             if (editMode) onEditCourse(course) else onCourseClick(course)
                                         }
                                     } }
@@ -2178,32 +2155,116 @@ private fun ScheduleGrid(today: Calendar, courses: List<Course>, focus: FocusCou
 }
 
 @Composable
-private fun CourseSlot(course: Course?, isFocus: Boolean, isInProgress: Boolean, editMode: Boolean, width: Dp, height: Dp, showPeriodRange: Boolean = false, onClick: () -> Unit) {
+private fun CourseSlot(course: Course?, isFocus: Boolean, isInProgress: Boolean, editMode: Boolean, width: Dp, height: Dp, showPeriodRange: Boolean = false, morphController: MorphController? = null, onClick: () -> Unit) {
     val c = LocalAppColors.current
     val tint = course?.let { courseTint(courseAccentFor(it)) }
     val interaction = remember { MutableInteractionSource() }
     val scale = rememberPressScale(interaction, Motion.PressScale)
-    val slotContent: @Composable () -> Unit = {
-    Column(Modifier.width(width).height(height).graphicsLayer { scaleX = scale; scaleY = scale }.clip(AppShape.cell).background(tint?.first ?: c.ink.copy(alpha = .035f)).then(if (isInProgress) Modifier.border(AppSpace.line * 1.5f, c.ink, AppShape.cell) else Modifier).clickable(interaction, null, enabled = course != null || editMode, onClick = onClick).semantics {
-        contentDescription = course?.let { "${it.name}，周${weekDayLabels[it.dayIndex]}，${periodTimeRange(it)}，${it.room.ifBlank { "未填写地点" }}" } ?: if (editMode) "添加课程" else "空闲时段"
-    }.padding(horizontal = AppSpace.cellHorizontal, vertical = AppSpace.cellVertical), verticalArrangement = Arrangement.spacedBy(AppSpace.gridGap)) {
-        if (course != null) {
-            val label = course.shortName?.takeIf { it.isNotBlank() } ?: shortName(course.name)
-            val latin = label.all { it.code < 128 }
-            val textWidth = width - AppSpace.cellHorizontal * 2
-            if (latin) FittedWeekText(label, AppType.cell, textWidth, tint!!.second, Modifier.courseTitle(course.id))
-            else Text(label, Modifier.courseTitle(course.id), style = AppType.cell, color = tint!!.second, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (showPeriodRange) FittedWeekText(compactPeriodRangeLabel(course), AppType.micro, textWidth, tint.second)
-            FittedWeekText(roomNumber(course.room).ifBlank { "未填写" }, AppType.micro, textWidth, tint.second)
+    val description = course?.let { "${it.name}，周${weekDayLabels[it.dayIndex]}，${periodTimeRange(it)}，${it.room.ifBlank { "未填写地点" }}" }
+        ?: if (editMode) "添加课程" else "空闲时段"
 
-        } else if (editMode) Text("+", style = AppType.cardTitle, color = c.mut)
+    @Composable
+    fun SlotBody(
+        foregroundOverride: Color?,
+        clickable: Boolean,
+        titleRenderer: (@Composable (String, TextStyle, Color, Modifier, Int, Boolean, TextOverflow) -> Unit)? = null,
+        exposeSemantics: Boolean = clickable
+    ) {
+        val foreground = foregroundOverride ?: tint?.second ?: c.mut
+        Column(
+            Modifier
+                .fillMaxSize()
+                .then(if (clickable) Modifier.clickable(interaction, null, enabled = course != null || editMode, onClick = onClick) else Modifier)
+                .then(if (exposeSemantics) Modifier.semantics { contentDescription = description } else Modifier)
+                .padding(horizontal = AppSpace.cellHorizontal, vertical = AppSpace.cellVertical),
+            verticalArrangement = Arrangement.spacedBy(AppSpace.gridGap)
+        ) {
+            if (course != null) {
+                val label = course.shortName?.takeIf { it.isNotBlank() } ?: shortName(course.name)
+                val latin = label.all { it.code < 128 }
+                val textWidth = width - AppSpace.cellHorizontal * 2
+                if (latin) {
+                    FittedWeekText(
+                        text = label,
+                        style = AppType.cell,
+                        width = textWidth,
+                        color = foreground,
+                        renderer = titleRenderer?.let { drawTitle ->
+                            { text, fittedStyle, textColor, modifier ->
+                                drawTitle(text, fittedStyle, textColor, modifier, 1, false, TextOverflow.Ellipsis)
+                            }
+                        }
+                    )
+                } else if (titleRenderer == null) {
+                    Text(label, style = AppType.cell, color = foreground, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                } else {
+                    titleRenderer?.invoke(label, AppType.cell, foreground, Modifier, 2, true, TextOverflow.Ellipsis)
+                }
+                if (showPeriodRange) FittedWeekText(compactPeriodRangeLabel(course), AppType.micro, textWidth, foreground)
+                FittedWeekText(roomNumber(course.room).ifBlank { "未填写" }, AppType.micro, textWidth, foreground)
+            } else if (editMode) {
+                Text("+", style = AppType.cardTitle, color = c.mut)
+            }
+        }
     }
+
+    if (course == null || morphController == null || editMode) {
+        Box(
+            Modifier
+                .width(width)
+                .height(height)
+                .graphicsLayer { scaleX = scale; scaleY = scale }
+                .clip(AppShape.cell)
+                .background(tint?.first ?: c.ink.copy(alpha = .035f))
+                .then(if (isInProgress) Modifier.border(AppSpace.line * 1.5f, c.ink, AppShape.cell) else Modifier)
+        ) { SlotBody(null, clickable = true) }
+    } else {
+        val sourceKey = "week-${course.weekNumber}-${course.id}"
+        MorphSource(
+            controller = morphController,
+            instanceKey = sourceKey,
+            details = MorphDetails(
+                id = course.id,
+                title = course.name,
+                periods = "周${weekDayLabels[course.dayIndex]} · ${periodRangeLabel(course)}",
+                time = periodTimeRange(course),
+                room = course.room,
+                hue = courseAccentFor(course)
+            ),
+            style = MorphSourceStyle(
+                fill = tint!!.first,
+                cornerRadius = AppSpace.cell,
+                foreground = tint.second,
+                outline = if (isInProgress) c.ink else Color.Transparent,
+                outlineWidth = if (isInProgress) AppSpace.line * 1.5f else 0.dp
+            ),
+            modifier = Modifier
+                .width(width)
+                .height(height)
+                .semantics { contentDescription = description },
+            onOpen = onClick
+        ) { foregroundOverride ->
+            SlotBody(
+                foregroundOverride,
+                clickable = false,
+                titleRenderer = { text, style, color, modifier, maxLines, softWrap, overflow ->
+                    Title(text, style, color, modifier, maxLines, softWrap, overflow)
+                },
+                exposeSemantics = false
+            )
+        }
     }
-    if (course == null) slotContent() else CourseSource(course.id, Modifier.width(width).height(height), slotContent)
 }
 
 @Composable
-private fun FittedWeekText(text: String, style: androidx.compose.ui.text.TextStyle, width: Dp, color: Color, modifier: Modifier = Modifier) {
+private fun FittedWeekText(
+    text: String,
+    style: androidx.compose.ui.text.TextStyle,
+    width: Dp,
+    color: Color,
+    modifier: Modifier = Modifier,
+    renderer: (@Composable (String, androidx.compose.ui.text.TextStyle, Color, Modifier) -> Unit)? = null
+) {
     val measurer = androidx.compose.ui.text.rememberTextMeasurer()
     val density = LocalDensity.current
     val available = with(density) { width.toPx() }
@@ -2212,7 +2273,11 @@ private fun FittedWeekText(text: String, style: androidx.compose.ui.text.TextSty
         val scale = (available / natural * .97f).coerceIn(8f / style.fontSize.value, 1f)
         style.copy(fontSize = style.fontSize * scale)
     }
-    Text(text, modifier, style = fitted, color = color, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+    if (renderer == null) {
+        Text(text, modifier, style = fitted, color = color, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+    } else {
+        renderer(text, fitted, color, modifier)
+    }
 }
 
 @Preview(widthDp = 360) @Composable private fun WeekLightPreview() { 课程表Theme(false) { ScheduleGrid(Calendar.getInstance(), emptyList(), null, 0, false, AppSpace.gridRow, { _, _ -> }, {}, {}) } }
@@ -2232,8 +2297,11 @@ private fun FittedWeekText(text: String, style: androidx.compose.ui.text.TextSty
         Course(-106, "长课示例", "", "A101", 6, 0, CoursePalette[0], endPeriod = 5),
         Course(-107, "嵌套课示例", "", "B202", 6, 2, CoursePalette[1], endPeriod = 3)
     ) }
-    WeekScreen(today, today.cloneCalendar().apply { add(Calendar.WEEK_OF_YEAR, offset) }, offset, samples,
-        null, {}, {}, { offset-- }, { offset = 0 }, { offset++ }, editing, { editing = !editing }, { _, _, _ -> }, {}, { _, _ -> }, {})
+    val morphController = rememberMorphController()
+    MorphHost(controller = morphController, onExitFinished = {}) {
+        WeekScreen(today, today.cloneCalendar().apply { add(Calendar.WEEK_OF_YEAR, offset) }, offset, samples,
+            null, {}, {}, { offset-- }, { offset = 0 }, { offset++ }, editing, { editing = !editing }, { _, _, _ -> }, {}, { _, _ -> }, {}, morphController)
+    }
 }
 
 @Composable
