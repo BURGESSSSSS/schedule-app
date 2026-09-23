@@ -1,7 +1,6 @@
 package com.burgess.schedule.ui.theme
 
 import android.app.Activity
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
@@ -13,23 +12,20 @@ import androidx.compose.material.ripple.RippleAlpha
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun 课程表Theme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+@Suppress("UNUSED_PARAMETER")
+fun 课程表Theme(darkTheme: Boolean = false, content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val savedTheme by remember(context) { Appearance.theme(context) }.collectAsState(initial = "跟随系统")
-    val savedScale by remember(context) { Appearance.scale(context) }.collectAsState(initial = 1f)
-    val effectiveDark = when (savedTheme) { "深色" -> true; "浅色" -> false; else -> darkTheme }
     SideEffect {
-        Motion.Scale = savedScale
         Motion.animationsEnabled = Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) != 0f
     }
-    val c = if (effectiveDark) DarkAppColors else LightAppColors
-    val scheme = if (effectiveDark) darkColorScheme() else lightColorScheme()
+    val c = LightAppColors
+    val scheme = lightColorScheme()
     val view = LocalView.current
     SideEffect {
         (view.context as? Activity)?.window?.let { window ->
             WindowCompat.getInsetsController(window, view).apply {
-                isAppearanceLightStatusBars = !effectiveDark
-                isAppearanceLightNavigationBars = !effectiveDark
+                isAppearanceLightStatusBars = true
+                isAppearanceLightNavigationBars = true
             }
         }
     }

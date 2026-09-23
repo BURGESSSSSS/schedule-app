@@ -33,12 +33,10 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.burgess.schedule.Ink
 import com.burgess.schedule.MutedInk
-import com.burgess.schedule.PickupBriefCard
 import com.burgess.schedule.cloneCalendar
 import com.burgess.schedule.currentDayIndex
 import com.burgess.schedule.mondayOfCurrentWeek
 import com.burgess.schedule.scheduleWeekNumber
-import com.burgess.schedule.data.PickupCodeEntity
 import com.burgess.schedule.ui.detail.CourseDetailController
 import com.burgess.schedule.ui.detail.CourseDetailData
 import com.burgess.schedule.ui.detail.CourseDetailSource
@@ -98,8 +96,7 @@ private fun Char.isLocationCjkOrDigit(): Boolean =
 @Composable
 internal fun TodayScreen(
     today: Calendar, courses: List<Course>, focus: FocusCourse?,
-    pendingPickups: List<PickupCodeEntity>, onPickupOpen: (PickupCodeEntity) -> Unit,
-    onPickupCopy: (String) -> Unit, onCourseClick: (Course) -> Unit,
+    onCourseClick: (Course) -> Unit,
     onImport: () -> Unit, onAdd: () -> Unit,
     detailController: CourseDetailController? = null
 ) {
@@ -129,7 +126,6 @@ internal fun TodayScreen(
                     com.burgess.schedule.ui.components.PillButton("手动添加", onAdd, com.burgess.schedule.ui.components.PillStyle.Secondary)
                 }
             }
-            if (pendingPickups.isNotEmpty()) PickupBriefCard(pendingPickups, onPickupOpen, onPickupCopy)
         }
         return
     }
@@ -176,7 +172,6 @@ internal fun TodayScreen(
                 } }
             } ?: if (state.state != DayState.EMPTY) SectionLabel("暂时没有后续课程，可到周视图添加或导入。") else Unit
         }
-        if (pendingPickups.isNotEmpty()) PickupBriefCard(pendingPickups, onPickupOpen, onPickupCopy)
     }
 }
 
@@ -312,5 +307,5 @@ private fun ColumnScope.TimelineCourseBody(
     }
 }
 
-@Preview @Composable private fun TodayLightPreview() { 课程表Theme(false) { TodayScreen(Calendar.getInstance(), emptyList(), null, emptyList(), {}, {}, {}, {}, {}) } }
-@Preview @Composable private fun TodayDarkPreview() { 课程表Theme(true) { TodayScreen(Calendar.getInstance(), emptyList(), null, emptyList(), {}, {}, {}, {}, {}) } }
+@Preview @Composable private fun TodayLightPreview() { 课程表Theme { TodayScreen(Calendar.getInstance(), emptyList(), null, {}, {}, {}) } }
+@Preview @Composable private fun TodayDarkPreview() { 课程表Theme(true) { TodayScreen(Calendar.getInstance(), emptyList(), null, {}, {}, {}) } }

@@ -1,9 +1,5 @@
 package com.burgess.schedule.ui.more
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import java.util.Calendar
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -12,19 +8,18 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import com.burgess.schedule.BuildConfig
 import com.burgess.schedule.Hairline
 import com.burgess.schedule.Ink
@@ -32,7 +27,6 @@ import com.burgess.schedule.MutedInk
 import com.burgess.schedule.R
 import com.burgess.schedule.ui.components.*
 import com.burgess.schedule.ui.theme.*
-import kotlinx.coroutines.launch
 
 internal data class DevLogSection(
     val title: String,
@@ -234,7 +228,7 @@ internal val devLogEntries = listOf(
 internal fun DevLogScreen(onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     SubPageScaffold("开发日志", onBack) {
-        devLogEntries.forEachIndexed { index, entry ->
+        devLogEntries.asReversed().forEachIndexed { index, entry ->
             key(entry.version) {
                 var expanded by remember { mutableStateOf(index == 0) }
                 com.burgess.schedule.ui.components.AppCard(Modifier.fillMaxWidth(), onClick = { expanded = !expanded }) {
@@ -261,52 +255,50 @@ internal fun DevLogScreen(onBack: () -> Unit) {
     }
 }
 @Preview @Composable private fun DevLogLight() { 课程表Theme(false) { DevLogScreen({}) } }
-@Preview @Composable private fun DevLogDark() { 课程表Theme(true) { DevLogScreen({}) } }
 
 @Composable
-internal fun MoreScreen(today: Calendar, onReminderClick: () -> Unit, onPickupClick: () -> Unit, onDevLogClick: () -> Unit, onDesignClick: () -> Unit) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val snack = remember { SnackbarHostState() }
-    val theme by remember { Appearance.theme(context) }.collectAsState(initial = "跟随系统")
-    var themeVisible by remember { mutableStateOf(false) }
-    Box(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(AppSpace.page), verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
-            Text("更多", style = AppType.title, color = Ink)
-            SectionLabel("设置与工具")
-            Spacer(Modifier.height(AppSpace.gap))
-            SectionLabel("功能")
-            ListGroup {
-                ListRow("课程提醒", "通知权限和测试通知", onReminderClick)
-                HorizontalDivider(color = Hairline)
-                ListRow("取件码", "包裹取件码和驿站", onPickupClick)
-            }
-            Spacer(Modifier.height(AppSpace.gap))
-            SectionLabel("外观")
-            ListGroup { ListRow("主题", theme, { themeVisible = true }) }
-            Spacer(Modifier.height(AppSpace.gap))
-            com.burgess.schedule.backup.BackupActions { snack.showSnackbar(it) }
-            SectionLabel("关于")
-            ListGroup {
-                ListRow("开发日志", "查看更新记录", onDevLogClick)
-                HorizontalDivider(color = Hairline)
-                ListRow("Arihara", "为爱发电", {
-                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("开发者邮箱", "suyu20651@gmail.com"))
-                    scope.launch { snack.showSnackbar("已复制邮箱") }
-                }, trailing = { Image(painterResource(R.drawable.developer_avatar), "开发者头像", Modifier.size(AppSpace.iconButton).clip(AppShape.pill), contentScale = ContentScale.Crop) })
-            }
-            if (BuildConfig.DEBUG) com.burgess.schedule.ui.components.PillButton("设计预览", onDesignClick, com.burgess.schedule.ui.components.PillStyle.Ghost, true)
-            Spacer(Modifier.height(AppSpace.card * 2))
-            Text("课程表 ${BuildConfig.VERSION_NAME} · 数据仅保存在本机", Modifier.fillMaxWidth(), style = AppType.caption, color = MutedInk, textAlign = TextAlign.Center)
+internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, onDeveloperClick: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(AppSpace.page),
+        verticalArrangement = Arrangement.spacedBy(AppSpace.gap)
+    ) {
+        Text("更多", style = AppType.title, color = Ink)
+        SectionLabel("课程")
+        ListGroup {
+            ListRow("课程提醒", "通知权限和测试通知", onReminderClick, icon = R.drawable.symbol_notifications)
         }
-        SnackbarHost(snack, Modifier.align(Alignment.BottomCenter)) { com.burgess.schedule.ui.components.AppSnackbar(it) }
+        SectionLabel("关于")
+        ListGroup {
+            ListRow("开发日志", "查看更新记录", onDevLogClick, icon = R.drawable.symbol_history)
+            HorizontalDivider(color = Hairline)
+            ListRow("关于开发者", "Arihara", onDeveloperClick, icon = R.drawable.symbol_mail)
+        }
+        Spacer(Modifier.weight(1f))
+        Text("课程表 ${BuildConfig.VERSION_NAME} · 数据仅保存在本机", Modifier.fillMaxWidth(), style = AppType.caption, color = MutedInk, textAlign = TextAlign.Center)
     }
-    if (themeVisible) BottomSheetContainer({ themeVisible = false }) {
-        Text("主题", style = AppType.sheetTitle, color = Ink)
-        listOf("跟随系统", "浅色", "深色").forEach { option ->
-            ListRow(option, onClick = { scope.launch { Appearance.setTheme(context, option) }; themeVisible = false }, trailing = { androidx.compose.material3.RadioButton(theme == option, onClick = { scope.launch { Appearance.setTheme(context, option) }; themeVisible = false }) })
+}
+@Composable
+internal fun DeveloperScreen(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    SubPageScaffold("关于开发者", onBack) {
+        Column(
+            Modifier.fillMaxWidth().padding(vertical = AppSpace.card),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(AppSpace.gap)
+        ) {
+            Image(
+                painterResource(R.drawable.developer_avatar),
+                contentDescription = "开发者头像",
+                modifier = Modifier.size(112.dp).clip(CircleShape),
+                contentScale = ContentScale.Crop
+            )
+            Text("Arihara", style = AppType.cardTitle, color = Ink)
+            SelectionContainer {
+                Text("suyu20651@gmail.com", style = AppType.body, color = MutedInk)
+            }
+            Text("为爱发电", style = AppType.caption, color = MutedInk)
         }
     }
 }
-@Preview @Composable private fun MoreLight() { 课程表Theme(false) { MoreScreen(Calendar.getInstance(), {}, {}, {}, {}) } }
-@Preview @Composable private fun MoreDark() { 课程表Theme(true) { MoreScreen(Calendar.getInstance(), {}, {}, {}, {}) } }
+
+@Preview @Composable private fun MoreLight() { 课程表Theme { MoreScreen({}, {}, {}) } }
