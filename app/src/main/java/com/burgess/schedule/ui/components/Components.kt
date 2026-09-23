@@ -18,6 +18,20 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import com.burgess.schedule.ui.theme.*
 
+@Composable
+internal fun rememberPressScale(
+    interactionSource: MutableInteractionSource,
+    pressedScale: Float = Motion.PressScale
+): Float {
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) pressedScale else 1f,
+        animationSpec = tween(Motion.PressMs),
+        label = "press scale"
+    )
+    return scale
+}
+
 @Composable fun Modifier.pressAction(onClick: () -> Unit, button: Boolean = false): Modifier {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()

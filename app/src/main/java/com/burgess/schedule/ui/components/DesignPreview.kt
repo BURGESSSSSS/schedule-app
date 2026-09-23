@@ -17,6 +17,7 @@ import com.burgess.schedule.BuildConfig
 import com.burgess.schedule.R
 import com.burgess.schedule.ui.theme.*
 import com.burgess.schedule.ui.morph.MorphSandbox
+import com.burgess.schedule.ui.week.WeekGridSandbox
 
 /** Debug entry only. Samples have local fake state and never touch course data. */
 @Composable
@@ -46,7 +47,7 @@ fun DesignPreview(onClose: (() -> Unit)? = null) {
     if (weekSample) {
         Column(Modifier.fillMaxSize().background(c.bg).safeDrawingPadding()) {
             PillButton("返回组件预览", { weekSample = false }, PillStyle.Ghost, small = true)
-            com.burgess.schedule.WeekGridSandbox()
+            WeekGridSandbox()
         }
         return
     }
