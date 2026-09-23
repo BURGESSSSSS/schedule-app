@@ -94,6 +94,9 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        // AGP's AIDL dependency parser cannot decode this project's Chinese path on Windows.
+        // IUserService.java is generated from the checked-in AIDL contract with build-tools 36.
+        aidl = false
     }
 }
 
@@ -109,6 +112,8 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     implementation(libs.google.mlkit.text.recognition.chinese)
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
     ksp(libs.androidx.room.compiler)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

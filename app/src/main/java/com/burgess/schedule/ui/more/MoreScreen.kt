@@ -257,7 +257,7 @@ internal fun DevLogScreen(onBack: () -> Unit) {
 @Preview @Composable private fun DevLogLight() { 课程表Theme(false) { DevLogScreen({}) } }
 
 @Composable
-internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, onDeveloperClick: () -> Unit) {
+internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, onDeveloperClick: () -> Unit, onSchoolProbeClick: () -> Unit = {}) {
     Column(
         Modifier.fillMaxSize().padding(AppSpace.page),
         verticalArrangement = Arrangement.spacedBy(AppSpace.gap)
@@ -272,6 +272,12 @@ internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, 
             ListRow("开发日志", "查看更新记录", onDevLogClick, icon = R.drawable.symbol_history)
             HorizontalDivider(color = Hairline)
             ListRow("关于开发者", "Arihara", onDeveloperClick, icon = R.drawable.symbol_mail)
+        }
+        if (BuildConfig.DEBUG) {
+            SectionLabel("开发调试")
+            ListGroup {
+                ListRow("学校同步技术验证", "Shizuku 与 WebView 页面探测", onSchoolProbeClick)
+            }
         }
         Spacer(Modifier.weight(1f))
         Text("课程表 ${BuildConfig.VERSION_NAME} · 数据仅保存在本机", Modifier.fillMaxWidth(), style = AppType.caption, color = MutedInk, textAlign = TextAlign.Center)

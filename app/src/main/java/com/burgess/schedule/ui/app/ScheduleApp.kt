@@ -109,6 +109,7 @@ import kotlinx.coroutines.launch
 import androidx.lifecycle.repeatOnLifecycle
 import com.burgess.schedule.ui.today.*
 import com.burgess.schedule.ui.more.*
+import com.burgess.schedule.school.sync.debug.SchoolSyncProbeScreen
 import com.burgess.schedule.ui.model.*
 import com.burgess.schedule.ui.components.SectionLabel
 import androidx.compose.runtime.key
@@ -171,6 +172,7 @@ internal fun ScheduleApp(
     var reminderStatus by remember { mutableStateOf(ReminderScheduler.getStatus(context)) }
     var devLogVisible by remember { mutableStateOf(false) }
     var developerVisible by remember { mutableStateOf(false) }
+    var schoolProbeVisible by remember { mutableStateOf(false) }
     var importOptionsVisible by remember { mutableStateOf(false) }
     var importWeekNumber by remember { mutableStateOf(0) }
     var editorWeekNumber by remember { mutableStateOf(0) }
@@ -198,7 +200,7 @@ internal fun ScheduleApp(
     var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
     // Only visible course pages need a minute ticker; overlays and background stop it.
     val scheduleVisible = selectedPage in 0..1 && expandedCourse == null &&
-        !editorVisible && !ocrVisible && !reminderVisible && !devLogVisible && !developerVisible && !importOptionsVisible
+        !editorVisible && !ocrVisible && !reminderVisible && !devLogVisible && !developerVisible && !schoolProbeVisible && !importOptionsVisible
     LaunchedEffect(scheduleVisible) {
         if (scheduleVisible) (hostContext as LifecycleOwner).lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
@@ -360,6 +362,7 @@ internal fun ScheduleApp(
                     weekEditing = false
                     devLogVisible = false
                     developerVisible = false
+                    schoolProbeVisible = false
                     reminderVisible = false
                     selectedPage = it
                 }
@@ -418,7 +421,8 @@ internal fun ScheduleApp(
                         else -> MoreScreen(
                             onReminderClick = { reminderVisible = true },
                             onDevLogClick = { devLogVisible = true },
-                            onDeveloperClick = { developerVisible = true }
+                            onDeveloperClick = { developerVisible = true },
+                            onSchoolProbeClick = { schoolProbeVisible = true }
                         )
                     }
                 }
@@ -447,6 +451,13 @@ internal fun ScheduleApp(
                 )
             ) {
                 DeveloperScreen(onBack = { developerVisible = false })
+            }
+            AnimatedVisibility(
+                visible = schoolProbeVisible,
+                enter = fadeIn(tween(220)) + slideInHorizontally(tween(280), initialOffsetX = { it / 10 }),
+                exit = fadeOut(tween(180)) + slideOutHorizontally(tween(220), targetOffsetX = { it / 10 })
+            ) {
+                SchoolSyncProbeScreen(onBack = { schoolProbeVisible = false })
             }
             AnimatedVisibility(
                 visible = reminderVisible,
