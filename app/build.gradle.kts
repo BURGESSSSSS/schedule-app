@@ -1,5 +1,13 @@
 import java.util.Properties
 import java.util.zip.ZipFile
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.tasks.InputFiles
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.testing.Test
 
 plugins {
@@ -13,6 +21,31 @@ val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+}
+val requiredReleaseSigningProperties = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+val missingReleaseSigningProperties = requiredReleaseSigningProperties.filter {
+    keystoreProperties.getProperty(it)?.isNotBlank() != true
+}
+if (keystorePropertiesFile.exists() && missingReleaseSigningProperties.isNotEmpty()) {
+    throw GradleException(
+        "keystore.properties is incomplete; missing required properties: " +
+            missingReleaseSigningProperties.joinToString(", ")
+    )
+}
+val configuredReleaseStoreFile = keystoreProperties.getProperty("storeFile")?.let(::file)
+val configuredReleaseKeyAlias = keystoreProperties.getProperty("keyAlias")
+val isStandardAndroidDebugSigningIdentity =
+    configuredReleaseStoreFile?.name?.equals("debug.keystore", ignoreCase = true) == true ||
+        configuredReleaseKeyAlias?.equals("androiddebugkey", ignoreCase = true) == true
+val hasReleaseSigning = keystorePropertiesFile.exists() && !isStandardAndroidDebugSigningIdentity
+if (!hasReleaseSigning) {
+    logger.warn(
+        if (isStandardAndroidDebugSigningIdentity) {
+            "The configured release identity is the standard Android debug key; release APKs will be unsigned."
+        } else {
+            "keystore.properties is absent; release APKs will be unsigned."
+        }
+    )
 }
 
 android {
@@ -32,7 +65,7 @@ android {
     }
 
     signingConfigs {
-        if (keystoreProperties.isNotEmpty()) {
+        if (hasReleaseSigning) {
             create("release") {
                 storeFile = file(keystoreProperties["storeFile"] as String)
                 storePassword = keystoreProperties["storePassword"] as String
@@ -47,9 +80,11 @@ android {
             optimization {
                 enable = true
             }
-            signingConfig = signingConfigs.getByName(
-                if (keystoreProperties.isNotEmpty()) "release" else "debug"
-            )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                signingConfig = null
+            }
         }
     }
     compileOptions {
@@ -93,35 +128,48 @@ val debugUnitTestKotlinClasses = layout.buildDirectory.dir(
 val debugMainKotlinClasses = layout.buildDirectory.dir(
     "intermediates/built_in_kotlinc/debug/compileDebugKotlin/classes"
 )
+val testRuntimeDirectory = layout.buildDirectory.dir("test-runtime")
+val androidTestRuntimeDirectory = layout.buildDirectory.dir("test-runtime/android")
 val portableTestClasses = tasks.register<Jar>("portableTestClasses") {
     dependsOn("compileDebugUnitTestKotlin")
     from(debugUnitTestKotlinClasses)
-    destinationDirectory.set(file("D:/CourseScheduleProjectCache/test-runtime"))
+    destinationDirectory.set(testRuntimeDirectory)
     archiveFileName.set("schedule-tests.jar")
 }
 val portableMainClasses = tasks.register<Jar>("portableMainClasses") {
     dependsOn("compileDebugKotlin")
     from(debugMainKotlinClasses)
-    destinationDirectory.set(file("D:/CourseScheduleProjectCache/test-runtime"))
+    destinationDirectory.set(testRuntimeDirectory)
     archiveFileName.set("schedule-main.jar")
 }
-val portableAndroidRuntime = tasks.register("portableAndroidRuntime") {
-    val runtime = configurations.getByName("debugUnitTestRuntimeClasspath")
-    inputs.files(runtime)
-    val destination = file("D:/CourseScheduleProjectCache/test-runtime/android")
-    outputs.dir(destination)
-    doLast {
+abstract class ExtractAarClassesTask : DefaultTask() {
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val runtimeArtifacts: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val destinationDirectory: DirectoryProperty
+
+    @TaskAction
+    fun extractClassesJars() {
+        val destination = destinationDirectory.get().asFile
         destination.mkdirs()
-        runtime.files.filter { it.extension == "aar" }.forEach { aar ->
+        runtimeArtifacts.files.filter { it.extension == "aar" }.forEach { aar ->
             ZipFile(aar).use { zip ->
                 zip.getEntry("classes.jar")?.let { entry ->
                     zip.getInputStream(entry).use { input ->
-                        destination.resolve(aar.nameWithoutExtension + ".jar").outputStream().use { output -> input.copyTo(output) }
+                        destination.resolve(aar.nameWithoutExtension + ".jar").outputStream().use { output ->
+                            input.copyTo(output)
+                        }
                     }
                 }
             }
         }
     }
+}
+val portableAndroidRuntime = tasks.register<ExtractAarClassesTask>("portableAndroidRuntime") {
+    runtimeArtifacts.from(configurations.named("debugUnitTestRuntimeClasspath"))
+    destinationDirectory.set(androidTestRuntimeDirectory)
 }
 tasks.register<Test>("verifyDebugUnitTests") {
     dependsOn(portableAndroidRuntime)
@@ -131,7 +179,7 @@ tasks.register<Test>("verifyDebugUnitTests") {
     classpath = project.files(
         portableTestClasses.flatMap { it.archiveFile },
         portableMainClasses.flatMap { it.archiveFile },
-        fileTree("D:/CourseScheduleProjectCache/test-runtime/android") { include("*.jar") },
+        fileTree(androidTestRuntimeDirectory) { include("*.jar") },
         configurations.getByName("debugUnitTestRuntimeClasspath")
     )
     useJUnit()
