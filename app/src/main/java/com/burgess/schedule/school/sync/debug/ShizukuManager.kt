@@ -33,7 +33,7 @@ internal class ShizukuManager(private val context: Context) {
     private val component = ComponentName(context.packageName, ShizukuUserService::class.java.name)
     private val serviceArgs = Shizuku.UserServiceArgs(
         component
-    ).processNameSuffix("school_sync_probe").daemon(false).tag("school_webview_probe").version(1)
+    ).processNameSuffix("school_sync_probe").daemon(false).tag("school_webview_probe").version(2)
     private val _diagnostics = MutableStateFlow(
         BindingDiagnostics(
             applicationId = context.packageName,

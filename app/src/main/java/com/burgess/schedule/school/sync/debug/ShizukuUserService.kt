@@ -1,14 +1,32 @@
 package com.burgess.schedule.school.sync.debug
 
 import android.os.Process
+import android.util.Log
 import java.io.File
 
 /** Runs in Shizuku's shell process. It exposes only socket discovery and a one-shot read-only list bridge. */
 class ShizukuUserService : IUserService.Stub() {
+    companion object {
+        private const val LOG_TAG = "SchoolUserService"
+
+        init {
+            Log.i(LOG_TAG, "CLASS_INITIALIZED pid=${Process.myPid()} uid=${Process.myUid()}")
+        }
+    }
+
     private val bridgeLock = Any()
     private var bridge: DevtoolsBridge? = null
 
-    override fun getUid(): Int = Process.myUid()
+    init {
+        // This runs after the generated Binder Stub constructor. Earlier failures need Shizuku's own Logcat.
+        Log.i(LOG_TAG, "CONSTRUCTOR_ENTERED pid=${Process.myPid()} uid=${Process.myUid()}")
+        Log.i(LOG_TAG, "BINDER_STUB_READY alive=${asBinder().isBinderAlive}")
+        Log.i(LOG_TAG, "CONSTRUCTOR_COMPLETED")
+    }
+
+    override fun getUid(): Int = Process.myUid().also {
+        Log.i(LOG_TAG, "GET_UID uid=$it pid=${Process.myPid()}")
+    }
 
     override fun findWebViewSockets(): Array<String> {
         val names = linkedSetOf<String>()
