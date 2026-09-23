@@ -1,6 +1,6 @@
 package com.burgess.schedule.ui.morph
 
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -78,6 +78,7 @@ import com.burgess.schedule.ui.theme.AppSpace
 import com.burgess.schedule.ui.theme.AppType
 import com.burgess.schedule.ui.theme.LocalAppColors
 import com.burgess.schedule.ui.theme.contrast
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -128,7 +129,16 @@ fun MorphHost(
                     MorphOverlayLayout(controller, session, target, colors)
                 }
             }
-            BackHandler { controller.requestDismiss() }
+        }
+        PredictiveBackHandler(enabled = session != null) { progressFlow ->
+            if (!controller.beginBackGesture()) return@PredictiveBackHandler
+            try {
+                progressFlow.collect { event -> controller.updateBackGesture(event.progress) }
+                controller.commitBackGesture()
+            } catch (cancelled: CancellationException) {
+                controller.cancelBackGesture()
+                throw cancelled
+            }
         }
     }
 }

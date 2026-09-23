@@ -49,7 +49,8 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
     val debugProgress: Float get() = if (sessionState.value == null) debugStartProgress else progress.value
     internal val sourceRenderer: (@Composable MorphSourceContentScope.(Color?) -> Unit)? get() = sourceRenderState.value
 
-    private enum class Phase { Idle, Opening, Expanded, Closing }
+    private enum class Phase { Idle, Opening, Expanded, BackGesture, Closing }
+    private var backGestureStart = 0f
 
     /** Detail controls are enabled only after the opening clock has settled. */
     internal val detailsInteractive: Boolean
@@ -151,6 +152,45 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
             phase = Phase.Idle
             animationJob = null
             onExitFinished(completed)
+        }
+    }
+
+    /** Stops the current opening clock and captures its progress for system Back. */
+    internal fun beginBackGesture(): Boolean {
+        if (sessionState.value == null || sessionGate.closing || phase == Phase.BackGesture) return false
+        animationJob?.cancel()
+        animationJob = null
+        backGestureStart = progress.value
+        phase = Phase.BackGesture
+        return true
+    }
+
+    /** Drives the shared morph clock backwards with the platform gesture. */
+    internal suspend fun updateBackGesture(gestureProgress: Float) {
+        if (sessionState.value == null || phase != Phase.BackGesture) return
+        progress.snapTo(backGestureStart * (1f - gestureProgress.coerceIn(0f, 1f)))
+    }
+
+    /** A completed system gesture continues through the regular close lifecycle. */
+    internal fun commitBackGesture() {
+        if (sessionState.value == null || phase != Phase.BackGesture) return
+        requestDismiss()
+    }
+
+    /** Restores from the current seek position on the controller's composition scope. */
+    internal fun cancelBackGesture() {
+        if (sessionState.value == null || phase != Phase.BackGesture) return
+        animationJob?.cancel()
+        if (progress.value >= .999f) {
+            phase = Phase.Expanded
+            animationJob = null
+            return
+        }
+        phase = Phase.Opening
+        animationJob = scope.launch {
+            animateTo(1f, 400)
+            if (sessionState.value != null && phase == Phase.Opening) phase = Phase.Expanded
+            animationJob = null
         }
     }
 
