@@ -50,12 +50,12 @@ internal data class LocalAdbReadOnlyCommand(
         )
         val PROCESS_QUERY = LocalAdbReadOnlyCommand(
             LocalAdbCommandKind.PROCESS_QUERY,
-            "ps -A -o PID,NAME 2>/dev/null",
+            "ps -A -o PID,NAME 2>/dev/null | awk 'NR == 1 || \$2 == \"com.tencent.wework\" || index(\$2, \"com.tencent.wework:\") == 1'",
             outputLimit = 96 * 1024
         )
         val MISSING_PROCESS_QUERY = LocalAdbReadOnlyCommand(
             LocalAdbCommandKind.MISSING_PROCESS_QUERY,
-            "ps -A -o PID,NAME 2>/dev/null",
+            "ps -A -o PID,NAME 2>/dev/null | awk 'NR == 1 || \$2 == \"com.burgess.schedule.__localadb_absent_probe__\" || index(\$2, \"com.burgess.schedule.__localadb_absent_probe__:\") == 1'",
             outputLimit = 96 * 1024
         )
 
@@ -233,31 +233,43 @@ private val FD_SCAN_SCRIPT = """
 if [ ! -d "/proc/@@PID@@/fd" ]; then
   printf '__FD_SCAN_FAILED__|@@PID@@|PROCESS_GONE\n'
 elif ! ls "/proc/@@PID@@/fd" >/dev/null 2>&1; then
-  printf '__FD_SCAN_PERMISSION_DENIED__|@@PID@@\n'
+  if [ ! -d "/proc/@@PID@@/fd" ]; then
+    printf '__FD_SCAN_FAILED__|@@PID@@|PROCESS_GONE\n'
+  else
+    printf '__FD_SCAN_PERMISSION_DENIED__|@@PID@@\n'
+  fi
 else
-  fd_problem=0
+  fd_permission_denied=0
+  fd_scan_failed=0
   for fd_path in /proc/@@PID@@/fd/*; do
     [ -e "§fd_path" ] || [ -L "§fd_path" ] || continue
-    target="$(readlink "§fd_path" 2>/dev/null)"
+    target_result="$(readlink "§fd_path" 2>&1)"
     readlink_status=$?
     if [ "§readlink_status" -ne 0 ]; then
-      fd_problem=1
+      case "§target_result" in
+        *"Permission denied"*) fd_permission_denied=1 ;;
+        *"No such file"*) ;;
+        *) fd_scan_failed=1 ;;
+      esac
       continue
     fi
+    target="§target_result"
     case "§target" in
       socket:\[*\])
         inode="§{target#socket:}"
         inode="§{inode#\[}"
         inode="§{inode%\]}"
         case "§inode" in *[!0-9]*|'') continue ;; esac
-        printf '__FD_SOCKET__|@@PID@@|%s\n' "§inode"
+        printf '__FD_SOCKET__|@@PID@@|%s|socket:[%s]\n' "§{fd_path##*/}" "§inode"
         ;;
     esac
   done
   if [ ! -d "/proc/@@PID@@/fd" ]; then
     printf '__FD_SCAN_FAILED__|@@PID@@|PROCESS_GONE\n'
-  elif [ "§fd_problem" -ne 0 ]; then
+  elif [ "§fd_permission_denied" -ne 0 ]; then
     printf '__FD_SCAN_PERMISSION_DENIED__|@@PID@@\n'
+  elif [ "§fd_scan_failed" -ne 0 ]; then
+    printf '__FD_SCAN_FAILED__|@@PID@@|READLINK_FAILED\n'
   else
     printf '__FD_SCAN_SUCCESS__|@@PID@@\n'
   fi

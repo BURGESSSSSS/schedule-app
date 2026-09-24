@@ -519,7 +519,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 )
                 shellState = SHELL_OPENED
 
-                val audits = mutableListOf<WeWorkProcessAudit>()
+                val fdResultsByPid = linkedMapOf<Int, ProcFdScanResult>()
                 for (process in processResult.processes) {
                     scanDiagnostics = scanDiagnostics.copy(
                         fdScanStates = scanDiagnostics.fdScanStates + (process.pid to ProcFdScanState.FD_SCAN_START),
@@ -534,6 +534,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     }
                     val fdResult = fdOutput?.let { parseProcFdScan(it.output, process.pid, it.exitCode) }
                         ?: ProcFdScanResult(process.pid, ProcFdScanState.FD_SCAN_FAILED, emptyList())
+                    fdResultsByPid[process.pid] = fdResult
                     scanDiagnostics = scanDiagnostics.copy(
                         fdScanStates = scanDiagnostics.fdScanStates + (process.pid to fdResult.state),
                         activeStep = null,
@@ -544,35 +545,51 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                         }
                     )
 
+                }
+
+                val audits = processResult.processes.map { process ->
+                    buildProcessAudit(
+                        process,
+                        fdResultsByPid.getValue(process.pid),
+                        unixResult.socketNamesByInode,
+                        mapsScan = null
+                    )
+                }.toMutableList()
+
+                // Optional kernel identification starts only after every WeWork process FD scan has completed.
+                for (index in audits.indices) {
+                    val audit = audits[index]
+                    val process = audit.process
                     val shouldReadMaps = process.processName == "com.tencent.wework" ||
                         process.processName == "com.tencent.wework:wxa_container0"
-                    var mapsResult: ProcMapsScanResult? = null
-                    if (shouldReadMaps) {
+                    if (!shouldReadMaps || audit.fdScanState != ProcFdScanState.FD_SCAN_SUCCESS) continue
+
+                    scanDiagnostics = scanDiagnostics.copy(
+                        mapsScanStates = scanDiagnostics.mapsScanStates + (process.pid to ProcMapsScanState.MAPS_SCAN_START),
+                        activeStep = "MAPS_SCAN pid=${process.pid}"
+                    )
+                    var mapsFailure: String? = null
+                    val mapsOutput = executeStep(LocalAdbReadOnlyCommand.mapsScan(process.pid), "MAPS_SCAN") { message ->
+                        mapsFailure = message
                         scanDiagnostics = scanDiagnostics.copy(
-                            mapsScanStates = scanDiagnostics.mapsScanStates + (process.pid to ProcMapsScanState.MAPS_SCAN_START),
-                            activeStep = "MAPS_SCAN pid=${process.pid}"
-                        )
-                        var mapsFailure: String? = null
-                        val mapsOutput = executeStep(LocalAdbReadOnlyCommand.mapsScan(process.pid), "MAPS_SCAN") { message ->
-                            mapsFailure = message
-                            scanDiagnostics = scanDiagnostics.copy(
-                                mapsScanStates = scanDiagnostics.mapsScanStates + (process.pid to ProcMapsScanState.MAPS_SCAN_FAILED)
-                            )
-                        }
-                        val parsedMapsResult = mapsOutput?.let { parseProcMapsScan(it.output, process.pid, it.exitCode) }
-                            ?: ProcMapsScanResult(process.pid, ProcMapsScanState.MAPS_SCAN_FAILED, emptyList())
-                        mapsResult = parsedMapsResult
-                        scanDiagnostics = scanDiagnostics.copy(
-                            mapsScanStates = scanDiagnostics.mapsScanStates + (process.pid to parsedMapsResult.state),
-                            activeStep = null,
-                            failure = when {
-                                mapsFailure != null -> "MAPS_SCAN pid=${process.pid}：$mapsFailure"
-                                parsedMapsResult.state == ProcMapsScanState.MAPS_SCAN_FAILED -> "MAPS_SCAN pid=${process.pid}：未收到有效扫描结果标记"
-                                else -> scanDiagnostics.failure
-                            }
+                            mapsScanStates = scanDiagnostics.mapsScanStates + (process.pid to ProcMapsScanState.MAPS_SCAN_FAILED)
                         )
                     }
-                    audits += buildProcessAudit(process, fdResult, unixResult.socketNamesByInode, mapsResult)
+                    val mapsResult = mapsOutput?.let { parseProcMapsScan(it.output, process.pid, it.exitCode) }
+                        ?: ProcMapsScanResult(process.pid, ProcMapsScanState.MAPS_SCAN_FAILED, emptyList())
+                    audits[index] = audit.copy(
+                        mapsScanState = mapsResult.state,
+                        libraries = mapsResult.libraries
+                    )
+                    scanDiagnostics = scanDiagnostics.copy(
+                        mapsScanStates = scanDiagnostics.mapsScanStates + (process.pid to mapsResult.state),
+                        activeStep = null,
+                        failure = when {
+                            mapsFailure != null -> "MAPS_SCAN pid=${process.pid}：$mapsFailure"
+                            mapsResult.state == ProcMapsScanState.MAPS_SCAN_FAILED -> "MAPS_SCAN pid=${process.pid}：未收到有效扫描结果标记"
+                            else -> scanDiagnostics.failure
+                        }
+                    )
                 }
 
                 val snapshot = LocalAdbScanSnapshot(
@@ -851,7 +868,8 @@ private fun LocalAdbScanSnapshotCard(
                         socket.socketName == null -> "无路径名"
                         else -> socket.socketName
                     }
-                    Text("inode ${socket.inode} · $name", style = AppType.caption, color = colors.ink)
+                    val category = classifyUnixSocketName(socket.socketName).joinToString(" · ") { it.label }
+                    Text("FD ${socket.fd} · inode ${socket.inode} · $category · $name", style = AppType.caption, color = colors.ink)
                 }
             }
 
@@ -872,29 +890,53 @@ private fun LocalAdbScanSnapshotCard(
     }
 
     if (baseline != null) {
-        val newProcesses = newlyAppearedProcesses(baseline.processes, snapshot.processes)
-        val newSockets = newlyOwnedSockets(baseline, snapshot)
-        val newInodes = newlyObservedSocketInodes(baseline, snapshot)
-        val newNamedSocketCount = newSockets.count { it.socket.presentInProcUnix && it.socket.socketName != null }
-        val newWxaSockets = newSockets.filter { it.process.processName == "com.tencent.wework:wxa_container0" }
         SectionLabel("A/B 差异")
-        Text("新增进程：${newProcesses.size}", style = AppType.caption, color = colors.ink)
-        newProcesses.forEach { process ->
-            Text("PID ${process.pid} · ${process.processName}", style = AppType.caption, color = colors.ink)
-        }
-        Text("新增 socket inode：${newInodes.size} · 新增具名 socket：$newNamedSocketCount", style = AppType.caption, color = colors.ink)
-        Text("wxa_container0 新增 socket：${newWxaSockets.size}", style = AppType.caption, color = colors.ink)
-        newSockets.forEach { reference ->
-            val name = if (reference.socket.presentInProcUnix) {
-                reference.socket.socketName ?: "无路径名"
-            } else {
-                "未在 /proc/net/unix 找到 inode"
+        if (!canCompareProcessSnapshots(baseline, snapshot)) {
+            Text("进程差异：INCONCLUSIVE（PROCESS_QUERY_FAILED）", style = AppType.caption, color = colors.danger)
+        } else {
+            val newProcesses = newlyAppearedProcesses(baseline.processes, snapshot.processes)
+            val goneProcesses = disappearedProcesses(baseline.processes, snapshot.processes)
+            Text("新增进程：${newProcesses.size}", style = AppType.caption, color = colors.ink)
+            newProcesses.forEach { process ->
+                Text("PID ${process.pid} · ${process.processName}", style = AppType.caption, color = colors.ink)
             }
+            Text("消失进程：${goneProcesses.size}", style = AppType.caption, color = colors.ink)
+            goneProcesses.forEach { process ->
+                Text("PID ${process.pid} · ${process.processName}", style = AppType.caption, color = colors.mut)
+            }
+        }
+
+        if (!canCompareSocketSnapshots(baseline, snapshot)) {
             Text(
-                "${reference.process.processName} · PID ${reference.process.pid} · inode ${reference.socket.inode} · $name",
+                "socket 差异：INCONCLUSIVE（需要两次 /proc/net/unix、进程查询和目标 FD 扫描完整成功，且 B 中有企业微信进程）",
                 style = AppType.caption,
-                color = colors.ink
+                color = colors.danger
             )
+        } else {
+            val newInodes = newlyObservedSocketInodes(baseline, snapshot)
+            val newSocketReferences = newlyOwnedSockets(baseline, snapshot)
+                .filter { it.socket.inode in newInodes }
+            val newNamedSocketCount = newSocketReferences.asSequence()
+                .filter { it.socket.presentInProcUnix && it.socket.socketName != null }
+                .map { it.socket.inode }
+                .distinct()
+                .count()
+            val newWxaSockets = newSocketReferences.filter { it.process.processName == "com.tencent.wework:wxa_container0" }
+            Text("企业微信新增持有 socket inode：${newInodes.size} · 新增具名：$newNamedSocketCount", style = AppType.caption, color = colors.ink)
+            Text("wxa_container0 新增归属：${newWxaSockets.size}", style = AppType.caption, color = colors.ink)
+            newSocketReferences.forEach { reference ->
+                val name = if (reference.socket.presentInProcUnix) {
+                    reference.socket.socketName ?: "无路径名"
+                } else {
+                    "未在 /proc/net/unix 找到 inode"
+                }
+                val category = classifyUnixSocketName(reference.socket.socketName).joinToString(" · ") { it.label }
+                Text(
+                    "${reference.process.processName} · PID ${reference.process.pid} · FD ${reference.socket.fd} · inode ${reference.socket.inode} · $category · $name",
+                    style = AppType.caption,
+                    color = colors.ink
+                )
+            }
         }
     }
 }

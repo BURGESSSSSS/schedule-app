@@ -62,14 +62,28 @@ internal data class ProcessQueryResult(
 internal data class ProcFdScanResult(
     val pid: Int,
     val state: ProcFdScanState,
-    val socketInodes: List<Long>
+    val socketFds: List<SocketFdReference>
+)
+
+internal data class SocketFdReference(
+    val fd: Int,
+    val inode: Long
 )
 
 internal data class OwnedUnixSocket(
+    val fd: Int,
     val inode: Long,
     val presentInProcUnix: Boolean,
     val socketName: String?
 )
+
+internal enum class UnixSocketNameCategory(val label: String) {
+    DEVTOOLS("DEVTOOLS"),
+    WEBVIEW("WEBVIEW"),
+    XWEB("XWEB"),
+    TBS_X5("TBS/X5"),
+    OTHER("OTHER")
+}
 
 internal data class WebViewKernelLibrary(
     val basename: String,
@@ -110,19 +124,16 @@ internal data class LocalAdbScanSnapshot(
 
 internal enum class SocketOwnershipClassification {
     OWNED_DEVTOOLS_SOCKET_FOUND,
-    OWNED_UNIX_SOCKET_FOUND,
+    OWNED_SOCKET_DELTA_FOUND,
     NO_OWNED_DEVTOOLS_SOCKET,
     PROC_FD_PERMISSION_DENIED,
-    PROCESS_NOT_FOUND,
-    PROCESS_QUERY_FAILED,
-    PROCESS_SCAN_INCOMPLETE,
-    PROC_UNIX_READ_FAILED
+    INCONCLUSIVE
 }
 
 private const val TARGET_PROCESS = "com.tencent.wework"
-private val SOCKET_DEBUG_TOKENS = listOf("devtools", "xweb", "webview")
 private val MAPS_KEYWORDS = setOf("xweb", "webview", "chromium", "tbs", "x5")
-private val SOCKET_FD_PATTERN = Regex("^__FD_SOCKET__\\|(\\d+)\\|(\\d+)$")
+private val SOCKET_FD_PATTERN = Regex("^__FD_SOCKET__\\|(\\d+)\\|(\\d+)\\|(socket:\\[\\d+\\])$")
+private val SOCKET_FD_TARGET_PATTERN = Regex("^socket:\\[(\\d+)\\]$")
 private val MAPS_LIBRARY_PATTERN = Regex("^__WX_MAPS_LIBRARY__\\|(\\d+)\\|([^|]+)\\|([^|]*)$")
 
 internal fun isWeWorkProcessName(processName: String): Boolean =
@@ -217,16 +228,23 @@ internal fun parseProcFdScan(output: String, pid: Int, exitCode: Int?): ProcFdSc
         isSuccess -> ProcFdScanState.FD_SCAN_SUCCESS
         else -> ProcFdScanState.FD_SCAN_FAILED
     }
-    val inodes = if (state == ProcFdScanState.FD_SCAN_SUCCESS) {
+    val socketFds = if (state == ProcFdScanState.FD_SCAN_SUCCESS) {
         lines.mapNotNull { line ->
-            SOCKET_FD_PATTERN.matchEntire(line)?.takeIf { it.groupValues[1].toIntOrNull() == pid }
-                ?.groupValues?.getOrNull(2)?.toLongOrNull()
-        }.distinct()
+            val match = SOCKET_FD_PATTERN.matchEntire(line)
+                ?.takeIf { it.groupValues[1].toIntOrNull() == pid }
+                ?: return@mapNotNull null
+            val fd = match.groupValues[2].toIntOrNull() ?: return@mapNotNull null
+            val inode = parseSocketFdTarget(match.groupValues[3]) ?: return@mapNotNull null
+            SocketFdReference(fd, inode)
+        }.distinctBy { it.inode }
     } else {
         emptyList()
     }
-    return ProcFdScanResult(pid, state, inodes)
+    return ProcFdScanResult(pid, state, socketFds)
 }
+
+internal fun parseSocketFdTarget(target: String): Long? =
+    SOCKET_FD_TARGET_PATTERN.matchEntire(target)?.groupValues?.getOrNull(1)?.toLongOrNull()
 
 internal fun parseProcMapsScan(output: String, pid: Int, exitCode: Int?): ProcMapsScanResult {
     require(pid > 0)
@@ -262,11 +280,12 @@ internal fun buildProcessAudit(
     process = process,
     fdScanState = fdScan.state,
     mapsScanState = mapsScan?.state ?: ProcMapsScanState.NOT_SCANNED,
-    sockets = fdScan.socketInodes.map { inode ->
+    sockets = fdScan.socketFds.map { socketFd ->
         OwnedUnixSocket(
-            inode = inode,
-            presentInProcUnix = socketNamesByInode.containsKey(inode),
-            socketName = socketNamesByInode[inode]
+            fd = socketFd.fd,
+            inode = socketFd.inode,
+            presentInProcUnix = socketNamesByInode.containsKey(socketFd.inode),
+            socketName = socketNamesByInode[socketFd.inode]
         )
     },
     libraries = mapsScan?.libraries.orEmpty()
@@ -280,6 +299,28 @@ internal fun newlyAppearedProcesses(
     return current.map(WeWorkProcessAudit::process).filterNot { process ->
         (process.pid to process.processName) in previous
     }
+}
+
+internal fun disappearedProcesses(
+    baseline: List<WeWorkProcessAudit>,
+    current: List<WeWorkProcessAudit>
+): List<WeWorkProcess> {
+    val currentProcesses = current.mapTo(hashSetOf()) { it.process.pid to it.process.processName }
+    return baseline.map(WeWorkProcessAudit::process).filterNot { process ->
+        (process.pid to process.processName) in currentProcesses
+    }
+}
+
+internal fun classifyUnixSocketName(name: String?): Set<UnixSocketNameCategory> {
+    if (name.isNullOrBlank()) return setOf(UnixSocketNameCategory.OTHER)
+    val normalized = name.lowercase(Locale.ROOT)
+    val categories = linkedSetOf<UnixSocketNameCategory>()
+    if ("devtools" in normalized) categories += UnixSocketNameCategory.DEVTOOLS
+    if ("webview" in normalized) categories += UnixSocketNameCategory.WEBVIEW
+    if ("xweb" in normalized) categories += UnixSocketNameCategory.XWEB
+    if ("tbs" in normalized || "x5" in normalized) categories += UnixSocketNameCategory.TBS_X5
+    if (categories.isEmpty()) categories += UnixSocketNameCategory.OTHER
+    return categories
 }
 
 internal fun ownedSocketReferences(snapshot: LocalAdbScanSnapshot): List<OwnedSocketReference> =
@@ -307,6 +348,21 @@ internal fun newlyObservedSocketInodes(
     return ownedSocketReferences(current).map { it.socket.inode }.filterNot { it in previous }.toSet()
 }
 
+internal fun canCompareSocketSnapshots(
+    baseline: LocalAdbScanSnapshot,
+    current: LocalAdbScanSnapshot
+): Boolean = current.processes.isNotEmpty() &&
+    listOf(baseline, current).all { snapshot ->
+        !snapshot.procUnixReadFailed &&
+            !snapshot.processQueryFailed &&
+            snapshot.processes.all { it.fdScanState == ProcFdScanState.FD_SCAN_SUCCESS }
+    }
+
+internal fun canCompareProcessSnapshots(
+    baseline: LocalAdbScanSnapshot,
+    current: LocalAdbScanSnapshot
+): Boolean = !baseline.processQueryFailed && !current.processQueryFailed
+
 internal fun identifyWebViewKernel(libraries: List<WebViewKernelLibrary>): WebViewKernelKind {
     val keywords = libraries.flatMapTo(hashSetOf()) { it.keywords }
     return when {
@@ -322,31 +378,30 @@ internal fun classifySocketOwnership(
     snapshot: LocalAdbScanSnapshot,
     baseline: LocalAdbScanSnapshot?
 ): SocketOwnershipClassification {
-    if (snapshot.procUnixReadFailed) return SocketOwnershipClassification.PROC_UNIX_READ_FAILED
-    if (snapshot.processQueryFailed) return SocketOwnershipClassification.PROCESS_QUERY_FAILED
-    if (snapshot.processes.isEmpty()) return SocketOwnershipClassification.PROCESS_NOT_FOUND
-
-    val hasOwnedDebugSocket = ownedSocketReferences(snapshot).any { reference ->
-        val name = reference.socket.socketName.orEmpty().lowercase(Locale.ROOT)
-        "devtools" in name && SOCKET_DEBUG_TOKENS.any { token -> name.contains(token) }
+    val hasOwnedDebugSocket = !snapshot.procUnixReadFailed && !snapshot.processQueryFailed &&
+        ownedSocketReferences(snapshot).any { reference ->
+        UnixSocketNameCategory.DEVTOOLS in classifyUnixSocketName(reference.socket.socketName)
     }
     if (hasOwnedDebugSocket) return SocketOwnershipClassification.OWNED_DEVTOOLS_SOCKET_FOUND
-    if (snapshot.processes.any { it.fdScanState == ProcFdScanState.FD_SCAN_PERMISSION_DENIED }) {
+    if (snapshot.processes.any { it.fdScanState == ProcFdScanState.FD_SCAN_PERMISSION_DENIED } ||
+        baseline?.processes?.any { it.fdScanState == ProcFdScanState.FD_SCAN_PERMISSION_DENIED } == true
+    ) {
         return SocketOwnershipClassification.PROC_FD_PERMISSION_DENIED
     }
-    if (baseline?.processes?.any { it.fdScanState == ProcFdScanState.FD_SCAN_PERMISSION_DENIED } == true) {
-        return SocketOwnershipClassification.PROC_FD_PERMISSION_DENIED
+    if (snapshot.procUnixReadFailed || snapshot.processQueryFailed || snapshot.processes.isEmpty()) {
+        return SocketOwnershipClassification.INCONCLUSIVE
     }
     if (snapshot.processes.any { it.fdScanState != ProcFdScanState.FD_SCAN_SUCCESS }) {
-        return SocketOwnershipClassification.PROCESS_SCAN_INCOMPLETE
+        return SocketOwnershipClassification.INCONCLUSIVE
+    }
+    if (baseline?.procUnixReadFailed == true || baseline?.processQueryFailed == true) {
+        return SocketOwnershipClassification.INCONCLUSIVE
     }
     if (baseline?.processes?.any { it.fdScanState != ProcFdScanState.FD_SCAN_SUCCESS } == true) {
-        return SocketOwnershipClassification.PROCESS_SCAN_INCOMPLETE
+        return SocketOwnershipClassification.INCONCLUSIVE
     }
-    if (baseline?.procUnixReadFailed == true) return SocketOwnershipClassification.PROC_UNIX_READ_FAILED
-    if (baseline?.processQueryFailed == true) return SocketOwnershipClassification.PROCESS_QUERY_FAILED
-    if (baseline != null && newlyOwnedSockets(baseline, snapshot).isNotEmpty()) {
-        return SocketOwnershipClassification.OWNED_UNIX_SOCKET_FOUND
+    if (baseline != null && newlyObservedSocketInodes(baseline, snapshot).isNotEmpty()) {
+        return SocketOwnershipClassification.OWNED_SOCKET_DELTA_FOUND
     }
     return SocketOwnershipClassification.NO_OWNED_DEVTOOLS_SOCKET
 }
