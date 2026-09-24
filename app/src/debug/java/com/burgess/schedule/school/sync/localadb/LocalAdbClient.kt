@@ -71,10 +71,14 @@ internal class LocalAdbClient(context: Context) : Closeable {
             var commandCompleted = false
             var partialOutputReceived = false
             var stream: AdbStream? = null
-            val wrappedCommand = wrapWithCommandSentinel(command, newSentinelId())
-            val buffer = SentinelCommandBuffer(
-                sentinel = wrappedCommand.sentinel,
-                outputLimit = command.outputLimit
+            val wrappedCommand = wrapWithCommandFrame(command, newCommandFrameId())
+            val wrapperEchoAllowance = wrappedCommand.input.toByteArray(Charsets.UTF_8).size
+            val markerAllowance = wrappedCommand.beginMarker.length + wrappedCommand.doneMarker.length
+            val buffer = CommandFrameBuffer(
+                beginMarker = wrappedCommand.beginMarker,
+                doneMarker = wrappedCommand.doneMarker,
+                outputLimit = command.outputLimit + wrapperEchoAllowance + markerAllowance + FRAME_TERMINAL_OVERHEAD_BYTES,
+                payloadLimit = command.outputLimit
             )
             try {
                 withTimeout(command.timeoutMs) {
@@ -84,12 +88,12 @@ internal class LocalAdbClient(context: Context) : Closeable {
                     commandOutput.write(wrappedCommand.input.toByteArray(Charsets.UTF_8))
                     commandOutput.flush()
                     val input = activeStream.openInputStream()
-                    when (val readResult = readUntilCommandSentinel(
+                    when (val readResult = readUntilCommandFrame(
                         input = input,
                         isStreamClosed = { activeStream.isClosed },
                         buffer = buffer
                     )) {
-                        is SentinelReadOutcome.Completed -> {
+                        is CommandFrameReadOutcome.Completed -> {
                             commandCompleted = true
                             output = readResult.payload.output
                             val commandExitCode = readResult.payload.exitCode
@@ -100,17 +104,17 @@ internal class LocalAdbClient(context: Context) : Closeable {
                                 failureSummary = "${command.safeLabel}: command exited with status $commandExitCode."
                             }
                         }
-                        is SentinelReadOutcome.StreamClosed -> {
+                        is CommandFrameReadOutcome.StreamClosed -> {
                             issue = LocalAdbReadIssue.STREAM_CLOSED
                             partialOutputReceived = readResult.partialOutputReceived
                             failureSummary = commandFailureSummary(command, "stream closed before sentinel", partialOutputReceived)
                         }
-                        is SentinelReadOutcome.EndOfStream -> {
+                        is CommandFrameReadOutcome.EndOfStream -> {
                             issue = LocalAdbReadIssue.END_OF_STREAM
                             partialOutputReceived = readResult.partialOutputReceived
                             failureSummary = commandFailureSummary(command, "EOF before sentinel", partialOutputReceived)
                         }
-                        is SentinelReadOutcome.OutputLimitExceeded -> {
+                        is CommandFrameReadOutcome.OutputLimitExceeded -> {
                             issue = LocalAdbReadIssue.OUTPUT_LIMIT
                             partialOutputReceived = readResult.partialOutputReceived
                             failureSummary = commandFailureSummary(command, "output limit reached before sentinel", partialOutputReceived)
@@ -174,6 +178,7 @@ internal class LocalAdbClient(context: Context) : Closeable {
 
     private companion object {
         const val LOOPBACK = "127.0.0.1"
+        const val FRAME_TERMINAL_OVERHEAD_BYTES = 256
     }
 }
 

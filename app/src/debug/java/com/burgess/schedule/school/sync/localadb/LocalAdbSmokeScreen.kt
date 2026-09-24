@@ -699,7 +699,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     if (busy && commandProbe.state == CommandExecutorProbeState.RUNNING) "命令验证中…" else "验证 printf test",
                     onClick = {
                         runExecutorProbe(LocalAdbReadOnlyCommand.PRINTF_TEST) { output ->
-                            if (analyzePrintfTestOutput(output, exitCode = 0).normalizedOutput == "test") {
+                            if (output == "test") {
                                 "printf test 输出正确"
                             } else {
                                 null

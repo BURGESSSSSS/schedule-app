@@ -1,7 +1,6 @@
 package com.burgess.schedule.school.sync.localadb
 
 import java.io.InputStream
-import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -13,8 +12,8 @@ import org.junit.Test
 
 class LocalAdbCommandProtocolTest {
     @Test
-    fun parsesBodyAndAtomicSentinelInOneChunk() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.PRINTF_TEST, SENTINEL_ID)
+    fun parsesBeginAndDoneInOneChunk() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PRINTF_TEST, FRAME_ID)
         val result = collect(frame("test", wrapped), wrapped)
 
         assertEquals("test", result.output)
@@ -22,29 +21,81 @@ class LocalAdbCommandProtocolTest {
     }
 
     @Test
-    fun parsesSentinelSplitAcrossMultipleChunks() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.ID, SENTINEL_ID)
-        val input = ChunkedInputStream(frame("uid=2000(shell)\n", wrapped).toByteArray(), chunkSize = 2)
-        val outcome = read(input, wrapped)
+    fun parsesBeginMarkerSplitAcrossChunks() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.ID, FRAME_ID)
+        val raw = frame("uid=2000(shell)", wrapped)
+        val bytes = raw.toByteArray()
+        val buffer = buffer(wrapped)
+        val markerStart = raw.indexOf(wrapped.beginMarker)
+        val splitAt = markerStart + wrapped.beginMarker.length / 2
+        assertEquals(null, buffer.append(bytes, 0, splitAt))
+        val payload = buffer.append(bytes, splitAt, bytes.size - splitAt)
 
-        assertTrue(outcome is SentinelReadOutcome.Completed)
-        assertEquals("uid=2000(shell)\n", (outcome as SentinelReadOutcome.Completed).payload.output)
-        assertEquals(0, outcome.payload.exitCode)
+        assertEquals("uid=2000(shell)", payload?.output)
+        assertEquals(0, payload?.exitCode)
     }
 
     @Test
-    fun parsesBodyDeliveredAcrossMultipleChunks() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.PRINTF_TEST, SENTINEL_ID)
-        val input = ChunkedInputStream(frame("first line\nsecond line", wrapped).toByteArray(), chunkSize = 4)
-        val outcome = read(input, wrapped)
+    fun parsesDoneMarkerSplitAcrossChunks() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PRINTF_TEST, FRAME_ID)
+        val raw = frame("test", wrapped)
+        val bytes = raw.toByteArray()
+        val buffer = buffer(wrapped)
+        val doneStart = raw.indexOf(wrapped.doneMarker)
+        val splitAt = doneStart + wrapped.doneMarker.length / 2
+        assertEquals(null, buffer.append(bytes, 0, splitAt))
+        val payload = buffer.append(bytes, splitAt, bytes.size - splitAt)
 
-        assertTrue(outcome is SentinelReadOutcome.Completed)
-        assertEquals("first line\nsecond line", (outcome as SentinelReadOutcome.Completed).payload.output)
+        assertEquals("test", payload?.output)
     }
 
     @Test
-    fun emptyBodyWithSentinelAndZeroExitIsSuccessful() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.MISSING_PROCESS_QUERY, SENTINEL_ID)
+    fun ignoresWrapperEchoContainingMarkersUnlessTheyAreStandaloneLines() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PRINTF_TEST, FRAME_ID)
+        val echoedWrapper = "dali:/ \$ ${wrapped.input.trimEnd()}\r\n"
+        val outcome = collectOutcome(echoedWrapper + frame("test", wrapped), wrapped)
+
+        assertTrue(outcome is CommandFrameReadOutcome.Completed)
+        assertEquals("test", (outcome as CommandFrameReadOutcome.Completed).payload.output)
+    }
+
+    @Test
+    fun ignoresPromptAndEchoBeforeBeginMarker() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PRINTF_TEST, FRAME_ID)
+        val preamble = "dali:/ \$ printf test\r\n"
+        val result = collect(preamble + frame("test", wrapped), wrapped)
+
+        assertEquals("test", result.output)
+    }
+
+    @Test
+    fun ignoresPromptAfterDoneMarker() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PRINTF_TEST, FRAME_ID)
+        val result = collect(frame("test", wrapped, postamble = "dali:/ \$ \r\nextra output"), wrapped)
+
+        assertEquals("test", result.output)
+        assertEquals(0, result.exitCode)
+    }
+
+    @Test
+    fun removesFrameSeparatorWhenPayloadHasNoTrailingNewline() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PRINTF_TEST, FRAME_ID)
+        val result = collect(frame("test", wrapped), wrapped)
+
+        assertEquals("test", result.output)
+    }
+
+    @Test
+    fun preservesMultilinePayload() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PROC_UNIX_READ, FRAME_ID)
+        val result = collect(frame("first line\nsecond line", wrapped), wrapped)
+
+        assertEquals("first line\nsecond line", result.output)
+    }
+
+    @Test
+    fun emptyPayloadParsesSuccessfully() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.MISSING_PROCESS_QUERY, FRAME_ID)
         val result = collect(frame("", wrapped), wrapped)
 
         assertEquals("", result.output)
@@ -52,8 +103,24 @@ class LocalAdbCommandProtocolTest {
     }
 
     @Test
-    fun nonZeroExitCodeIsReturnedWithAtomicSentinel() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.PROC_UNIX_READ, SENTINEL_ID)
+    fun acceptsLfMarkerLines() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PRINTF_TEST, FRAME_ID)
+        val result = collect(frame("body", wrapped, lineEnding = "\n"), wrapped)
+
+        assertEquals("body", result.output)
+    }
+
+    @Test
+    fun acceptsCrLfMarkerLinesAndPreservesPayloadCrLf() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PRINTF_TEST, FRAME_ID)
+        val result = collect(frame("first\r\nsecond", wrapped, lineEnding = "\r\n"), wrapped)
+
+        assertEquals("first\r\nsecond", result.output)
+    }
+
+    @Test
+    fun returnsNonZeroExitCodeFromDoneMarker() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PROC_UNIX_READ, FRAME_ID)
         val result = collect(frame("permission diagnostic", wrapped, exitCode = 1), wrapped)
 
         assertEquals("permission diagnostic", result.output)
@@ -61,76 +128,28 @@ class LocalAdbCommandProtocolTest {
     }
 
     @Test
-    fun acceptsLfSentinelLineEnding() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.PRINTF_TEST, SENTINEL_ID)
-        val result = collect(frame("body", wrapped, lineEnding = "\n"), wrapped)
+    fun ignoresMarkersWithWrongUuid() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PRINTF_TEST, FRAME_ID)
+        val wrong = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PRINTF_TEST, OTHER_FRAME_ID)
+        val raw = "${wrong.beginMarker}\n${wrong.doneMarker}:0\n" +
+            "${wrapped.beginMarker}\nbody\n${wrong.doneMarker}:1\n" +
+            "${wrapped.doneMarker}:0\n"
+        val result = collect(raw, wrapped)
 
-        assertEquals("body", result.output)
+        assertEquals("body\n${wrong.doneMarker}:1", result.output)
         assertEquals(0, result.exitCode)
     }
 
     @Test
-    fun acceptsCrLfSentinelLineEnding() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.PRINTF_TEST, SENTINEL_ID)
-        val result = collect(frame("body", wrapped, lineEnding = "\r\n"), wrapped)
-
-        assertEquals("body", result.output)
-        assertEquals(0, result.exitCode)
-    }
-
-    @Test
-    fun ordinaryDoneTextInOutputDoesNotCompleteCommand() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.PRINTF_TEST, SENTINEL_ID)
-        val ordinaryText = "normal __DONE__ marker\n"
-        val outcome = read(
-            ChunkedInputStream(frame(ordinaryText, wrapped).toByteArray(), chunkSize = 3),
-            wrapped
-        )
-
-        assertTrue(outcome is SentinelReadOutcome.Completed)
-        assertEquals(ordinaryText, (outcome as SentinelReadOutcome.Completed).payload.output)
-    }
-
-    @Test
-    fun anotherCommandsUuidDoesNotCompleteThisCommand() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.PRINTF_TEST, SENTINEL_ID)
-        val buffer = buffer(wrapped)
-        val wrongId = "fedcba0987654321fedcba0987654321"
-        val wrongMarker = "${wrapped.sentinel.substringBefore(SENTINEL_ID)}${wrongId}__:0\n"
-        val wrongBytes = wrongMarker.toByteArray()
-
-        assertEquals(null, buffer.append(wrongBytes, 0, wrongBytes.size))
-
-        val correctSuffix = "${wrapped.sentinel}:0\n".toByteArray()
-        val result = buffer.append(correctSuffix, 0, correctSuffix.size)
-        assertEquals(0, result?.exitCode)
-        assertTrue(result?.output?.contains(wrongMarker.trim()) == true)
-    }
-
-    @Test
-    fun waitsForSentinelLineTerminatorWhenDigitsEndAtChunkBoundary() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.PRINTF_TEST, SENTINEL_ID)
-        val buffer = buffer(wrapped)
-        val partialLine = "body\n${wrapped.sentinel}:0".toByteArray()
-
-        assertEquals(null, buffer.append(partialLine, 0, partialLine.size))
-
-        val lineTerminator = "\n".toByteArray()
-        val result = buffer.append(lineTerminator, 0, lineTerminator.size)
-        assertEquals("body", result?.output)
-        assertEquals(0, result?.exitCode)
-    }
-
-    @Test
-    fun waitsForCorrectSentinelBeforeTimingOut() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.ID, SENTINEL_ID)
-        val input = OpenAfterBytesInputStream("partial output\n".toByteArray())
+    fun waitsForDoneMarkerBeforeTimingOut() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.ID, FRAME_ID)
+        val input = OpenAfterBytesInputStream("${wrapped.beginMarker}\npartial".toByteArray())
         val buffer = buffer(wrapped)
         var timedOut = false
         runBlocking {
             try {
                 withTimeout(60) {
-                    readUntilCommandSentinel(input, { false }, buffer, pollIntervalMs = 5)
+                    readUntilCommandFrame(input, { false }, buffer, pollIntervalMs = 5)
                 }
             } catch (_: TimeoutCancellationException) {
                 timedOut = true
@@ -142,76 +161,51 @@ class LocalAdbCommandProtocolTest {
     }
 
     @Test
-    fun correctSentinelCompletesEvenWhenStreamIsAlreadyClosedAfterItsBytes() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.PRINTF_TEST, SENTINEL_ID)
-        val input = OpenAfterBytesInputStream(frame("test", wrapped).toByteArray())
-        val closedChecks = AtomicInteger()
-        val outcome = runBlocking {
-            readUntilCommandSentinel(input, { closedChecks.incrementAndGet(); true }, buffer(wrapped), pollIntervalMs = 1)
-        }
+    fun wrapperIsOnePhysicalShellLineWithMatchingRandomMarkers() {
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.mapsScan(12345), FRAME_ID)
 
-        assertTrue(outcome is SentinelReadOutcome.Completed)
-        assertEquals("test", (outcome as SentinelReadOutcome.Completed).payload.output)
-        assertEquals(0, closedChecks.get())
+        assertEquals(1, wrapped.input.count { it == '\n' })
+        assertTrue(wrapped.input.startsWith("{ printf '\\n${wrapped.beginMarker}\\n'; eval \"\$(printf '%b' "))
+        assertTrue(wrapped.input.contains("__burgess_rc=\$?; printf '\\n${wrapped.doneMarker}:%d\\n' \"\$__burgess_rc\"; }\n"))
+        assertEquals(FRAME_ID, wrapped.beginMarker.removePrefix("__BURGESS_BEGIN_").removeSuffix("__"))
+        assertEquals(FRAME_ID, wrapped.doneMarker.removePrefix("__BURGESS_DONE_").removeSuffix("__"))
+        assertFalse(wrapped.input.contains("\neval "))
     }
 
     @Test
-    fun wrapperUsesOneStatusBearingSentinelAndSavesStatusFirst() {
-        val wrapped = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.ID, SENTINEL_ID)
+    fun everyCommandGetsItsOwnFrameId() {
+        val first = wrapWithCommandFrame(LocalAdbReadOnlyCommand.ID, newCommandFrameId())
+        val second = wrapWithCommandFrame(LocalAdbReadOnlyCommand.ID, newCommandFrameId())
 
-        assertTrue(wrapped.input.endsWith("\n"))
-        assertTrue(wrapped.input.contains("__burgess_rc=\$?\nprintf '\\n${wrapped.sentinel}:%d\\n' \"\$__burgess_rc\""))
-        assertFalse(wrapped.input.contains("__BURGESS_CMD_EXIT_"))
+        assertNotEquals(first.beginMarker, second.beginMarker)
+        assertNotEquals(first.doneMarker, second.doneMarker)
     }
 
-    @Test
-    fun everyCommandGetsItsOwnSentinelId() {
-        val first = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.ID, newSentinelId())
-        val second = wrapWithCommandSentinel(LocalAdbReadOnlyCommand.ID, newSentinelId())
-
-        assertNotEquals(first.sentinel, second.sentinel)
-    }
-
-    private fun read(input: InputStream, wrapped: WrappedShellCommand): SentinelReadOutcome = runBlocking {
-        readUntilCommandSentinel(input, { false }, buffer(wrapped), pollIntervalMs = 1)
-    }
-
-    private fun buffer(wrapped: WrappedShellCommand) = SentinelCommandBuffer(
-        sentinel = wrapped.sentinel,
-        outputLimit = 16 * 1024
+    private fun buffer(wrapped: WrappedCommandFrame) = CommandFrameBuffer(
+        beginMarker = wrapped.beginMarker,
+        doneMarker = wrapped.doneMarker,
+        outputLimit = 32 * 1024
     )
 
-    private fun collect(text: String, wrapped: WrappedShellCommand): SentinelCommandPayload {
+    private fun collectOutcome(text: String, wrapped: WrappedCommandFrame): CommandFrameReadOutcome {
         val bytes = text.toByteArray()
         val buffer = buffer(wrapped)
-        return buffer.append(bytes, 0, bytes.size) ?: error("Expected the status-bearing completion sentinel")
+        val result = buffer.append(bytes, 0, bytes.size)
+        return result?.let { CommandFrameReadOutcome.Completed(it) }
+            ?: error("Expected a complete BEGIN/DONE frame")
     }
+
+    private fun collect(text: String, wrapped: WrappedCommandFrame): CommandFramePayload =
+        (collectOutcome(text, wrapped) as CommandFrameReadOutcome.Completed).payload
 
     private fun frame(
-        output: String,
-        wrapped: WrappedShellCommand,
+        payload: String,
+        wrapped: WrappedCommandFrame,
         exitCode: Int = 0,
-        lineEnding: String = "\n"
-    ): String = output + lineEnding + "${wrapped.sentinel}:$exitCode" + lineEnding
-
-    private class ChunkedInputStream(
-        private val bytes: ByteArray,
-        private val chunkSize: Int
-    ) : InputStream() {
-        private var position = 0
-
-        override fun available(): Int = minOf(chunkSize, bytes.size - position)
-
-        override fun read(): Int = if (position >= bytes.size) -1 else bytes[position++].toInt() and 0xff
-
-        override fun read(destination: ByteArray, offset: Int, length: Int): Int {
-            if (position >= bytes.size) return -1
-            val count = minOf(length, chunkSize, bytes.size - position)
-            bytes.copyInto(destination, offset, position, position + count)
-            position += count
-            return count
-        }
-    }
+        lineEnding: String = "\n",
+        postamble: String = ""
+    ): String = "${wrapped.beginMarker}$lineEnding$payload$lineEnding" +
+        "${wrapped.doneMarker}:$exitCode$lineEnding$postamble"
 
     private class OpenAfterBytesInputStream(private val bytes: ByteArray) : InputStream() {
         private var position = 0
@@ -230,6 +224,7 @@ class LocalAdbCommandProtocolTest {
     }
 
     private companion object {
-        const val SENTINEL_ID = "1234567890abcdef1234567890abcdef"
+        const val FRAME_ID = "1234567890abcdef1234567890abcdef"
+        const val OTHER_FRAME_ID = "fedcba0987654321fedcba0987654321"
     }
 }
