@@ -32,7 +32,7 @@ import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_FAILED
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_OPENED
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_OPENING
 import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand.ID
-import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand.DEVTOOLS_SOCKET_SCAN
+import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand.PROCESS_SOCKET_AUDIT
 import com.burgess.schedule.ui.components.AppCard
 import com.burgess.schedule.ui.components.PillButton
 import com.burgess.schedule.ui.components.PillStyle
@@ -42,7 +42,6 @@ import com.burgess.schedule.ui.theme.AppSpace
 import com.burgess.schedule.ui.theme.AppType
 import com.burgess.schedule.ui.theme.LocalAppColors
 import java.io.IOException
-import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -327,23 +326,32 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 connectionState = ADB_CONNECTED
 
                 shellState = SHELL_OPENING
-                val scanOutput = client.executeReadOnly(DEVTOOLS_SOCKET_SCAN)
+                val scanOutput = client.executeReadOnly(PROCESS_SOCKET_AUDIT)
                 if (scanOutput.issue != LocalAdbReadIssue.NONE) {
                     throw IOException(scanOutput.failureSummary ?: "Read-only socket scan did not complete.")
                 }
                 shellState = SHELL_OPENED
                 val result = parseLocalAdbScanSnapshot(scanOutput.output)
+                if (recordBaseline) {
+                    baselineScan = result
+                    currentScan = null
+                } else {
+                    currentScan = result
+                }
                 if (result.procUnixReadFailed) {
                     socketScanState = WebViewSocketScanState.PROC_UNIX_READ_FAILED
-                    lastError = "PROC_UNIX_READ_FAILED：无法读取 /proc/net/unix，暂不判断 DevTools sockets。"
+                    lastError = "PROC_UNIX_READ_FAILED：无法读取 /proc/net/unix，暂不判断进程 socket 归属。"
+                    return@launch
+                }
+                if (result.processQueryFailed) {
+                    socketScanState = WebViewSocketScanState.SCAN_FAILED
+                    lastError = "企业微信进程查询失败；保留了本次 /proc/net/unix 统计供诊断。"
                     return@launch
                 }
 
                 if (recordBaseline) {
-                    baselineScan = result
                     socketScanState = WebViewSocketScanState.BASELINE_RECORDED
                 } else {
-                    currentScan = result
                     socketScanState = WebViewSocketScanState.COMPARISON_COMPLETE
                 }
             } catch (cancelled: CancellationException) {
@@ -359,7 +367,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         }
     }
 
-    SubPageScaffold("Local ADB / WebView sockets", onBack) {
+    SubPageScaffold("Local ADB / 企业微信 Socket 归属", onBack) {
         Text(
             "只连接本机 127.0.0.1。你需要在系统 Wireless Debugging 页面手动配对；本页不会打开或更改系统设置。",
             style = AppType.body,
@@ -424,11 +432,11 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
 
-        SectionLabel("步骤 3 · WebView / XWeb socket 只读发现")
+        SectionLabel("步骤 3 · 企业微信进程 Unix socket 只读归属")
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
                 Text(
-                    "只读取 /proc/net/unix 的统计值和名称含 devtools、xweb、webview、tbs 的 socket；进程查询只保留 com.tencent.wework。不会连接 socket。",
+                    "按 PID 只读枚举 com.tencent.wework 进程的 fd，将 socket inode 对照 /proc/net/unix。主进程和 wxa_container0 仅筛选 maps 中指定内核库的 basename。不会连接 socket。",
                     style = AppType.body,
                     color = colors.ink
                 )
@@ -449,7 +457,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 currentScan?.let { snapshot ->
                     LocalAdbScanSnapshotCard("B 当前状态", snapshot, baselineScan)
                     Text(
-                        "发现判断：${classifyDevtoolsDiscovery(snapshot, baselineScan)}",
+                        "归属判断：${classifySocketOwnership(snapshot, baselineScan).name}",
                         style = AppType.caption,
                         color = colors.ink
                     )
@@ -474,6 +482,9 @@ private fun LocalAdbScanSnapshotCard(
 ) {
     val colors = LocalAppColors.current
     SectionLabel(title)
+    if (snapshot.procUnixReadFailed) {
+        Text("PROC_UNIX_READ_FAILED：/proc/net/unix 统计或 inode 映射读取失败。", style = AppType.caption, color = colors.danger)
+    }
     snapshot.stats?.let { stats ->
         Text(
             "/proc/net/unix：总行数 ${stats.totalLines} · 有名称 ${stats.namedSockets} · abstract ${stats.abstractSockets}",
@@ -483,74 +494,77 @@ private fun LocalAdbScanSnapshotCard(
     }
     if (snapshot.processQueryFailed) {
         Text("企业微信进程查询失败。", style = AppType.caption, color = colors.danger)
-    } else if (snapshot.weWorkProcesses.isEmpty()) {
+    } else if (snapshot.processes.isEmpty()) {
         Text("未发现 com.tencent.wework 进程。", style = AppType.caption, color = colors.mut)
     } else {
-        Text("企业微信进程：${snapshot.weWorkProcesses.size}", style = AppType.caption, color = colors.ink)
-        snapshot.weWorkProcesses.forEach { process ->
-            Text("PID ${process.pid} · ${process.processName}", style = AppType.caption, color = colors.ink)
+        Text("企业微信进程：${snapshot.processes.size}", style = AppType.caption, color = colors.ink)
+        val orderedProcesses = snapshot.processes.sortedBy {
+            if (it.process.processName == "com.tencent.wework:wxa_container0") 0 else 1
         }
-    }
-
-    Text("候选 sockets：${snapshot.sockets.size}", style = AppType.caption, color = colors.ink)
-    if (snapshot.sockets.isEmpty()) {
-        Text("没有匹配到相关 socket 名称。", style = AppType.caption, color = colors.mut)
-    } else {
-        snapshot.sockets.forEach { socket ->
-            Text("${socket.name} · ${socket.kind}", style = AppType.caption, color = colors.ink)
-        }
-    }
-
-    if (snapshot.pidMatches.isNotEmpty()) {
-        SectionLabel("WXWORK_SOCKET_PID_MATCH")
-        snapshot.pidMatches.forEach { match ->
-            Text(
-                "${match.socketName} ↔ PID ${match.process.pid} · ${match.process.processName}",
-                style = AppType.caption,
-                color = colors.ink
+        orderedProcesses.forEach { audit ->
+            val process = audit.process
+            SectionLabel(
+                if (process.processName == "com.tencent.wework:wxa_container0") {
+                    "重点候选进程 · ${process.processName}"
+                } else {
+                    process.processName
+                }
             )
+            Text("PID ${process.pid} · fd 状态：${audit.fdScanState}", style = AppType.caption, color = if (audit.fdScanState == ProcFdScanState.PERMISSION_DENIED) colors.danger else colors.ink)
+            Text("持有 Unix sockets：${audit.sockets.size}", style = AppType.caption, color = colors.ink)
+            if (audit.sockets.isEmpty()) {
+                Text("没有发现 socket fd。", style = AppType.caption, color = colors.mut)
+            } else {
+                audit.sockets.forEach { socket ->
+                    val name = when {
+                        !socket.presentInProcUnix -> "未在 /proc/net/unix 找到 inode"
+                        socket.socketName == null -> "无路径名"
+                        else -> socket.socketName
+                    }
+                    Text("inode ${socket.inode} · $name", style = AppType.caption, color = colors.ink)
+                }
+            }
+
+            Text("maps：${audit.mapsScanState}", style = AppType.caption, color = if (audit.mapsScanState == ProcMapsScanState.READ_FAILED) colors.mut else colors.ink)
+            if (audit.libraries.isNotEmpty()) {
+                audit.libraries.forEach { library ->
+                    Text("${library.basename} · ${library.keywords.joinToString()}", style = AppType.caption, color = colors.ink)
+                }
+                Text(
+                    "内核线索：${identifyWebViewKernel(audit.libraries).displayName}",
+                    style = AppType.caption,
+                    color = colors.mut
+                )
+            } else if (audit.mapsScanState == ProcMapsScanState.READABLE) {
+                Text("未筛选到指定内核库名。", style = AppType.caption, color = colors.mut)
+            }
         }
     }
 
     if (baseline != null) {
-        val newProcesses = newlyAppearedWeWorkProcesses(baseline.weWorkProcesses, snapshot.weWorkProcesses)
-        val newSockets = newlyAppearedSockets(baseline.sockets, snapshot.sockets)
-        Text("A/B 新进程：${newProcesses.size}", style = AppType.caption, color = colors.ink)
+        val newProcesses = newlyAppearedProcesses(baseline.processes, snapshot.processes)
+        val newSockets = newlyOwnedSockets(baseline, snapshot)
+        val newInodes = newlyObservedSocketInodes(baseline, snapshot)
+        val newNamedSocketCount = newSockets.count { it.socket.presentInProcUnix && it.socket.socketName != null }
+        val newWxaSockets = newSockets.filter { it.process.processName == "com.tencent.wework:wxa_container0" }
+        SectionLabel("A/B 差异")
+        Text("新增进程：${newProcesses.size}", style = AppType.caption, color = colors.ink)
         newProcesses.forEach { process ->
             Text("PID ${process.pid} · ${process.processName}", style = AppType.caption, color = colors.ink)
         }
-        Text("A/B 新 sockets：${newSockets.size}", style = AppType.caption, color = colors.ink)
-        newSockets.forEach { socket ->
-            Text("${socket.name} · ${socket.kind}", style = AppType.caption, color = colors.ink)
+        Text("新增 socket inode：${newInodes.size} · 新增具名 socket：$newNamedSocketCount", style = AppType.caption, color = colors.ink)
+        Text("wxa_container0 新增 socket：${newWxaSockets.size}", style = AppType.caption, color = colors.ink)
+        newSockets.forEach { reference ->
+            val name = if (reference.socket.presentInProcUnix) {
+                reference.socket.socketName ?: "无路径名"
+            } else {
+                "未在 /proc/net/unix 找到 inode"
+            }
+            Text(
+                "${reference.process.processName} · PID ${reference.process.pid} · inode ${reference.socket.inode} · $name",
+                style = AppType.caption,
+                color = colors.ink
+            )
         }
-    }
-}
-
-private fun classifyDevtoolsDiscovery(
-    current: LocalAdbScanSnapshot,
-    baseline: LocalAdbScanSnapshot?
-): String {
-    if (current.procUnixReadFailed) return "PROC_UNIX_READ_FAILED"
-    if (current.processQueryFailed) return "企业微信进程查询失败"
-    if (current.weWorkProcesses.isEmpty()) return "企业微信进程未发现，暂不能分类"
-
-    val pidMatchedNames = current.pidMatches.mapTo(hashSetOf()) { it.socketName.lowercase(Locale.ROOT) }
-    val newSocketNames = baseline?.let {
-        newlyAppearedSockets(it.sockets, current.sockets).mapTo(hashSetOf()) { socket ->
-            socket.name.lowercase(Locale.ROOT)
-        }
-    }.orEmpty()
-    fun associated(kind: DevtoolsSocketKind): Boolean = current.sockets.any { socket ->
-        val normalizedName = socket.name.lowercase(Locale.ROOT)
-        socket.kind == kind && (normalizedName in pidMatchedNames || normalizedName in newSocketNames)
-    }
-
-    return when {
-        associated(DevtoolsSocketKind.XWEB) -> "XWEB_SOCKET_FOUND"
-        associated(DevtoolsSocketKind.WEBVIEW) -> "WEBVIEW_SOCKET_FOUND"
-        current.sockets.any { it.kind == DevtoolsSocketKind.XWEB } -> "发现 XWEB 候选，归属未确认"
-        current.sockets.any { it.kind == DevtoolsSocketKind.WEBVIEW } -> "发现 WebView 候选，归属未确认"
-        current.sockets.isNotEmpty() -> "OTHER_DEVTOOLS_SOCKET_FOUND"
-        else -> "NO_DEVTOOLS_SOCKET"
     }
 }
