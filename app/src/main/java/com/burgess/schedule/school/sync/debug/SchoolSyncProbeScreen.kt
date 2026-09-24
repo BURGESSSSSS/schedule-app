@@ -9,6 +9,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,6 +25,7 @@ import com.burgess.schedule.ui.components.SubPageScaffold
 import com.burgess.schedule.ui.theme.AppSpace
 import com.burgess.schedule.ui.theme.AppType
 import com.burgess.schedule.ui.theme.LocalAppColors
+import com.burgess.schedule.school.sync.golden.ShizukuManager as GoldenShizukuManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,6 +42,16 @@ internal fun SchoolSyncProbeScreen(onBack: () -> Unit) {
     var result by remember { mutableStateOf<ScanResult?>(null) }
     var failure by remember { mutableStateOf<ProbeError?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var goldenBinding by remember { mutableStateOf(false) }
+    var goldenConnected by remember { mutableStateOf(false) }
+    var goldenPing by remember { mutableStateOf<String?>(null) }
+    var goldenUid by remember { mutableStateOf<Int?>(null) }
+    var goldenError by remember { mutableStateOf<String?>(null) }
+    val goldenVerified = goldenConnected && goldenPing == "pong" && goldenUid == 2000
+
+    DisposableEffect(Unit) {
+        onDispose { GoldenShizukuManager.unbindUserService() }
+    }
 
     fun run(action: suspend () -> Unit) {
         if (busy) return
@@ -63,19 +75,53 @@ internal fun SchoolSyncProbeScreen(onBack: () -> Unit) {
                 else -> "× 未安装"
             }}", style = AppType.body, color = colors.ink)
             Text("授权：${when (state?.authorized) { true -> "✓ 已授权"; false -> "× 未授权"; null -> "未检查" }}", style = AppType.body, color = colors.ink)
-            Text("UserService：${if (diagnostic.verified) "✓ 已绑定 / 已验证（本次）" else "未验证"}", style = AppType.body, color = colors.ink)
-            Text("UID: ${diagnostic.uid?.toString() ?: "未取得"}${if (diagnostic.uid != null && !diagnostic.verified) "（非 shell UID）" else ""}", style = AppType.caption, color = colors.mut)
+            Text("Candidate UserService：${if (diagnostic.verified) "✓ 已绑定 / 已验证（本次）" else "未验证"}", style = AppType.body, color = colors.ink)
+            Text("Candidate UID: ${diagnostic.uid?.toString() ?: "未取得"}${if (diagnostic.uid != null && !diagnostic.verified) "（非 shell UID）" else ""}", style = AppType.caption, color = colors.mut)
             Text("WebView sockets：发现 ${result?.socketCount ?: 0} 个", style = AppType.body, color = colors.ink)
             Text("CDP bridge：${when (result?.bridgeConnected) { true -> "✓ 本次连接成功，已关闭"; false -> "未连接"; null -> "未验证" }}", style = AppType.body, color = colors.ink)
+        }
+        AppCard(Modifier.fillMaxWidth()) {
+            Text("Golden UserService：${if (goldenVerified) "已验证" else "未验证"}", style = AppType.body, color = colors.ink)
+            Text("Golden onServiceConnected：${if (goldenConnected) "是" else "否"}", style = AppType.body, color = colors.ink)
+            Text("Golden ping：${goldenPing ?: "未取得"}", style = AppType.body, color = colors.ink)
+            Text("Golden UID：${goldenUid?.toString() ?: "未取得"}", style = AppType.body, color = colors.ink)
+            if (goldenBinding) Text("Golden UserService 正在连接…", style = AppType.caption, color = colors.mut)
+            goldenError?.let { Text("Golden 错误：$it", style = AppType.caption, color = colors.danger) }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
             PillButton("检查 Shizuku", { run { state = withContext(Dispatchers.IO) { manager.check() } } }, PillStyle.Secondary, small = true)
             PillButton("申请授权", { run { manager.requestPermission(); state = withContext(Dispatchers.IO) { manager.check() } } }, PillStyle.Secondary, small = true)
         }
-        PillButton("验证 UserService / UID", { run {
-            state = withContext(Dispatchers.IO) { manager.check() }
-            manager.verifyUserService()
-        } }, PillStyle.Secondary, small = true)
+        PillButton("验证 Golden UserService", {
+            if (!goldenBinding) {
+                goldenBinding = true
+                goldenConnected = false
+                goldenPing = null
+                goldenUid = null
+                goldenError = null
+                GoldenShizukuManager.bindUserService(
+                    onServiceConnected = { goldenConnected = true; goldenError = null },
+                    onPing = {
+                        goldenPing = it
+                        if (it != "pong") goldenError = "ping 未返回 pong"
+                    },
+                    onUid = {
+                        goldenUid = it
+                        goldenBinding = false
+                        if (it != 2000) goldenError = "UID 应为 2000，实际为 $it"
+                        else if (goldenPing == "pong") goldenError = null
+                    },
+                    onDisconnected = {
+                        goldenConnected = false
+                        goldenBinding = false
+                    },
+                    onError = {
+                        goldenError = it
+                        goldenBinding = false
+                    }
+                )
+            }
+        }, PillStyle.Secondary, small = true)
         Row(horizontalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
             PillButton("扫描 WebView", { run {
                 state = withContext(Dispatchers.IO) { manager.check() }
@@ -86,7 +132,7 @@ internal fun SchoolSyncProbeScreen(onBack: () -> Unit) {
         }
         if (busy) SectionLabel("正在执行，请稍候…")
         failure?.let { Text("错误：${it.displayName()}", style = AppType.caption, color = colors.danger) }
-        SectionLabel("绑定诊断（不含页面数据）")
+        SectionLabel("Candidate 绑定诊断（旧实现，不代表 Golden 测试）")
         AppCard(Modifier.fillMaxWidth()) {
             Text("阶段：${diagnostic.stage}", style = AppType.body, color = colors.ink)
             Text("实际 applicationId：${diagnostic.applicationId}", style = AppType.caption, color = colors.mut)
