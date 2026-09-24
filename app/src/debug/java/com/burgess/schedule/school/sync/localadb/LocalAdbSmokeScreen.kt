@@ -32,7 +32,7 @@ import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_FAILED
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_OPENED
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_OPENING
 import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand.ID
-import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand.WEBVIEW_SOCKET_SCAN
+import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand.DEVTOOLS_SOCKET_SCAN
 import com.burgess.schedule.ui.components.AppCard
 import com.burgess.schedule.ui.components.PillButton
 import com.burgess.schedule.ui.components.PillStyle
@@ -42,6 +42,7 @@ import com.burgess.schedule.ui.theme.AppSpace
 import com.burgess.schedule.ui.theme.AppType
 import com.burgess.schedule.ui.theme.LocalAppColors
 import java.io.IOException
+import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -75,8 +76,11 @@ internal enum class LocalAdbReadIssue {
 
 internal enum class WebViewSocketScanState {
     NOT_RUN,
-    SCANNING,
-    SCAN_SUCCESS,
+    SCANNING_BASELINE,
+    BASELINE_RECORDED,
+    SCANNING_CURRENT,
+    COMPARISON_COMPLETE,
+    PROC_UNIX_READ_FAILED,
     SCAN_FAILED
 }
 
@@ -167,7 +171,8 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var uidState by remember { mutableStateOf("未验证") }
     var uidVerified by remember { mutableStateOf(false) }
     var socketScanState by remember { mutableStateOf(WebViewSocketScanState.NOT_RUN) }
-    var webViewSocketNames by remember { mutableStateOf(emptyList<String>()) }
+    var baselineScan by remember { mutableStateOf<LocalAdbScanSnapshot?>(null) }
+    var currentScan by remember { mutableStateOf<LocalAdbScanSnapshot?>(null) }
     var lastError by remember { mutableStateOf<String?>(null) }
 
     DisposableEffect(client) {
@@ -205,7 +210,8 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         uidState = "未验证"
         uidVerified = false
         socketScanState = WebViewSocketScanState.NOT_RUN
-        webViewSocketNames = emptyList()
+        baselineScan = null
+        currentScan = null
         busy = true
         operationScope.launch {
             try {
@@ -244,7 +250,8 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         uidState = "未验证"
         uidVerified = false
         socketScanState = WebViewSocketScanState.NOT_RUN
-        webViewSocketNames = emptyList()
+        baselineScan = null
+        currentScan = null
         busy = true
         operationScope.launch {
             try {
@@ -282,10 +289,15 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         }
     }
 
-    fun scanWebViewSockets() {
+    fun scanSockets(recordBaseline: Boolean) {
         if (busy) return
         if (!uidVerified) {
-            lastError = "请先运行 id 并验证 UID 2000，再扫描 WebView sockets。"
+            lastError = "请先运行 id 并验证 UID 2000，再扫描 sockets。"
+            socketScanState = WebViewSocketScanState.SCAN_FAILED
+            return
+        }
+        if (!recordBaseline && baselineScan == null) {
+            lastError = "请先在企业微信课表页面关闭时记录 A 基线。"
             socketScanState = WebViewSocketScanState.SCAN_FAILED
             return
         }
@@ -298,8 +310,14 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         }
 
         lastError = null
-        webViewSocketNames = emptyList()
-        socketScanState = WebViewSocketScanState.SCANNING
+        if (recordBaseline) {
+            baselineScan = null
+            currentScan = null
+            socketScanState = WebViewSocketScanState.SCANNING_BASELINE
+        } else {
+            currentScan = null
+            socketScanState = WebViewSocketScanState.SCANNING_CURRENT
+        }
         connectionState = ADB_CONNECTING
         busy = true
         operationScope.launch {
@@ -309,18 +327,25 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 connectionState = ADB_CONNECTED
 
                 shellState = SHELL_OPENING
-                val scanOutput = client.executeReadOnly(WEBVIEW_SOCKET_SCAN)
+                val scanOutput = client.executeReadOnly(DEVTOOLS_SOCKET_SCAN)
                 if (scanOutput.issue != LocalAdbReadIssue.NONE) {
-                    throw IOException(scanOutput.failureSummary ?: "WebView socket scan did not complete.")
+                    throw IOException(scanOutput.failureSummary ?: "Read-only socket scan did not complete.")
                 }
-                val exitCode = scanOutput.exitCode
-                if (exitCode == null || exitCode !in 0..1) {
-                    throw IOException("WebView socket scan failed (exit code ${exitCode ?: "unknown"}).")
+                shellState = SHELL_OPENED
+                val result = parseLocalAdbScanSnapshot(scanOutput.output)
+                if (result.procUnixReadFailed) {
+                    socketScanState = WebViewSocketScanState.PROC_UNIX_READ_FAILED
+                    lastError = "PROC_UNIX_READ_FAILED：无法读取 /proc/net/unix，暂不判断 DevTools sockets。"
+                    return@launch
                 }
 
-                shellState = SHELL_OPENED
-                webViewSocketNames = parseWebViewSocketNames(scanOutput.output)
-                socketScanState = WebViewSocketScanState.SCAN_SUCCESS
+                if (recordBaseline) {
+                    baselineScan = result
+                    socketScanState = WebViewSocketScanState.BASELINE_RECORDED
+                } else {
+                    currentScan = result
+                    socketScanState = WebViewSocketScanState.COMPARISON_COMPLETE
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (exception: Exception) {
@@ -399,29 +424,35 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
 
-        SectionLabel("步骤 3 · 只读扫描 WebView sockets")
+        SectionLabel("步骤 3 · WebView / XWeb socket 只读发现")
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
                 Text(
-                    "只筛选 /proc/net/unix 中名称含 webview_devtools_remote 的 socket。不会连接 socket 或读取页面内容。",
+                    "只读取 /proc/net/unix 的统计值和名称含 devtools、xweb、webview、tbs 的 socket；进程查询只保留 com.tencent.wework。不会连接 socket。",
                     style = AppType.body,
                     color = colors.ink
                 )
                 PillButton(
-                    if (busy && socketScanState == WebViewSocketScanState.SCANNING) "扫描中…" else "扫描 WebView sockets",
-                    onClick = ::scanWebViewSockets,
+                    if (busy && socketScanState == WebViewSocketScanState.SCANNING_BASELINE) "记录 A 中…" else "记录 A 基线（课表关闭）",
+                    onClick = { scanSockets(recordBaseline = true) },
                     style = PillStyle.Primary
                 )
+                PillButton(
+                    if (busy && socketScanState == WebViewSocketScanState.SCANNING_CURRENT) "扫描 B 中…" else "扫描 B 当前状态（课表保持打开）",
+                    onClick = { scanSockets(recordBaseline = false) },
+                    style = PillStyle.Secondary
+                )
                 Text("扫描状态：${socketScanState.name}", style = AppType.caption, color = colors.mut)
-                if (socketScanState == WebViewSocketScanState.SCAN_SUCCESS) {
-                    Text("WebView sockets：发现 ${webViewSocketNames.size} 个", style = AppType.caption, color = colors.ink)
-                    if (webViewSocketNames.isEmpty()) {
-                        Text("没有发现匹配的 socket。", style = AppType.caption, color = colors.mut)
-                    } else {
-                        webViewSocketNames.forEach { socketName ->
-                            Text(socketName, style = AppType.caption, color = colors.ink)
-                        }
-                    }
+                baselineScan?.let { snapshot ->
+                    LocalAdbScanSnapshotCard("A 基线", snapshot)
+                }
+                currentScan?.let { snapshot ->
+                    LocalAdbScanSnapshotCard("B 当前状态", snapshot, baselineScan)
+                    Text(
+                        "发现判断：${classifyDevtoolsDiscovery(snapshot, baselineScan)}",
+                        style = AppType.caption,
+                        color = colors.ink
+                    )
                 }
             }
         }
@@ -432,5 +463,94 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 if (lastError != null) Text("错误：$lastError", style = AppType.caption, color = colors.danger)
             }
         }
+    }
+}
+
+@Composable
+private fun LocalAdbScanSnapshotCard(
+    title: String,
+    snapshot: LocalAdbScanSnapshot,
+    baseline: LocalAdbScanSnapshot? = null
+) {
+    val colors = LocalAppColors.current
+    SectionLabel(title)
+    snapshot.stats?.let { stats ->
+        Text(
+            "/proc/net/unix：总行数 ${stats.totalLines} · 有名称 ${stats.namedSockets} · abstract ${stats.abstractSockets}",
+            style = AppType.caption,
+            color = colors.mut
+        )
+    }
+    if (snapshot.processQueryFailed) {
+        Text("企业微信进程查询失败。", style = AppType.caption, color = colors.danger)
+    } else if (snapshot.weWorkProcesses.isEmpty()) {
+        Text("未发现 com.tencent.wework 进程。", style = AppType.caption, color = colors.mut)
+    } else {
+        Text("企业微信进程：${snapshot.weWorkProcesses.size}", style = AppType.caption, color = colors.ink)
+        snapshot.weWorkProcesses.forEach { process ->
+            Text("PID ${process.pid} · ${process.processName}", style = AppType.caption, color = colors.ink)
+        }
+    }
+
+    Text("候选 sockets：${snapshot.sockets.size}", style = AppType.caption, color = colors.ink)
+    if (snapshot.sockets.isEmpty()) {
+        Text("没有匹配到相关 socket 名称。", style = AppType.caption, color = colors.mut)
+    } else {
+        snapshot.sockets.forEach { socket ->
+            Text("${socket.name} · ${socket.kind}", style = AppType.caption, color = colors.ink)
+        }
+    }
+
+    if (snapshot.pidMatches.isNotEmpty()) {
+        SectionLabel("WXWORK_SOCKET_PID_MATCH")
+        snapshot.pidMatches.forEach { match ->
+            Text(
+                "${match.socketName} ↔ PID ${match.process.pid} · ${match.process.processName}",
+                style = AppType.caption,
+                color = colors.ink
+            )
+        }
+    }
+
+    if (baseline != null) {
+        val newProcesses = newlyAppearedWeWorkProcesses(baseline.weWorkProcesses, snapshot.weWorkProcesses)
+        val newSockets = newlyAppearedSockets(baseline.sockets, snapshot.sockets)
+        Text("A/B 新进程：${newProcesses.size}", style = AppType.caption, color = colors.ink)
+        newProcesses.forEach { process ->
+            Text("PID ${process.pid} · ${process.processName}", style = AppType.caption, color = colors.ink)
+        }
+        Text("A/B 新 sockets：${newSockets.size}", style = AppType.caption, color = colors.ink)
+        newSockets.forEach { socket ->
+            Text("${socket.name} · ${socket.kind}", style = AppType.caption, color = colors.ink)
+        }
+    }
+}
+
+private fun classifyDevtoolsDiscovery(
+    current: LocalAdbScanSnapshot,
+    baseline: LocalAdbScanSnapshot?
+): String {
+    if (current.procUnixReadFailed) return "PROC_UNIX_READ_FAILED"
+    if (current.processQueryFailed) return "企业微信进程查询失败"
+    if (current.weWorkProcesses.isEmpty()) return "企业微信进程未发现，暂不能分类"
+
+    val pidMatchedNames = current.pidMatches.mapTo(hashSetOf()) { it.socketName.lowercase(Locale.ROOT) }
+    val newSocketNames = baseline?.let {
+        newlyAppearedSockets(it.sockets, current.sockets).mapTo(hashSetOf()) { socket ->
+            socket.name.lowercase(Locale.ROOT)
+        }
+    }.orEmpty()
+    fun associated(kind: DevtoolsSocketKind): Boolean = current.sockets.any { socket ->
+        val normalizedName = socket.name.lowercase(Locale.ROOT)
+        socket.kind == kind && (normalizedName in pidMatchedNames || normalizedName in newSocketNames)
+    }
+
+    return when {
+        associated(DevtoolsSocketKind.XWEB) -> "XWEB_SOCKET_FOUND"
+        associated(DevtoolsSocketKind.WEBVIEW) -> "WEBVIEW_SOCKET_FOUND"
+        current.sockets.any { it.kind == DevtoolsSocketKind.XWEB } -> "发现 XWEB 候选，归属未确认"
+        current.sockets.any { it.kind == DevtoolsSocketKind.WEBVIEW } -> "发现 WebView 候选，归属未确认"
+        current.sockets.isNotEmpty() -> "OTHER_DEVTOOLS_SOCKET_FOUND"
+        else -> "NO_DEVTOOLS_SOCKET"
     }
 }

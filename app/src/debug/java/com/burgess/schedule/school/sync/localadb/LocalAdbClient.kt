@@ -47,7 +47,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 private const val MAX_ID_OUTPUT_CHARS = 1024
-private const val MAX_SOCKET_SCAN_OUTPUT_BYTES = 16 * 1024
+private const val MAX_SOCKET_SCAN_OUTPUT_BYTES = 32 * 1024
 
 internal enum class LocalAdbReadOnlyCommand(
     internal val shellInput: String,
@@ -55,19 +55,33 @@ internal enum class LocalAdbReadOnlyCommand(
     internal val isComplete: (String) -> Boolean
 ) {
     ID("id\n", MAX_ID_OUTPUT_CHARS, ::hasCompleteUidField),
-    WEBVIEW_SOCKET_SCAN(
-        "grep -F 'webview_devtools_remote' /proc/net/unix; " +
-            "printf '\\n__LOCAL_ADB_SCAN_DONE__%s\\n' \"\$?\"\n",
+    DEVTOOLS_SOCKET_SCAN(
+        "awk 'NR == 1 { next } { " +
+            "name = \$8; " +
+            "if (NF >= 8 && name != \"\") { " +
+            "named++; " +
+            "if (substr(name, 1, 1) == \"@\") abstract++; " +
+            "if (tolower(name) ~ /devtools|xweb|webview|tbs/) " +
+            "printf \"__DEVTOOLS_SOCKET__|%s\\n\", name; " +
+            "} " +
+            "} END { printf \"__PROC_UNIX_SUMMARY__|%d|%d|%d\\n\", NR, named, abstract }' " +
+            "/proc/net/unix 2>/dev/null; " +
+            "printf '__PROC_UNIX_EXIT__|%s\\n' \"\$?\"; " +
+            "ps -A -o PID,NAME 2>/dev/null | awk '" +
+            "NR > 0 && \$1 ~ /^[0-9]+\$/ && " +
+            "(\$2 == \"com.tencent.wework\" || index(\$2, \"com.tencent.wework:\") == 1) { " +
+            "printf \"__WXWORK_PROCESS__|%s|%s\\n\", \$1, \$2 " +
+            "} END { if (NR > 0) print \"__WXWORK_QUERY_DONE__\" }'; " +
+            "printf '__LOCAL_ADB_SCAN_DONE__\\n'\n",
         MAX_SOCKET_SCAN_OUTPUT_BYTES,
-        ::hasSocketScanFinished
+        ::hasLocalAdbScanFinished
     )
 }
 
 internal data class LocalAdbCommandOutput(
     val output: String,
     val issue: LocalAdbReadIssue,
-    val failureSummary: String?,
-    val exitCode: Int?
+    val failureSummary: String?
 )
 
 internal class LocalAdbClient(context: Context) : Closeable {
@@ -153,12 +167,7 @@ internal class LocalAdbClient(context: Context) : Closeable {
             LocalAdbCommandOutput(
                 output = resultOutput,
                 issue = issue,
-                failureSummary = failureSummary,
-                exitCode = if (command == LocalAdbReadOnlyCommand.WEBVIEW_SOCKET_SCAN) {
-                    socketScanExitCode(resultOutput)
-                } else {
-                    null
-                }
+                failureSummary = failureSummary
             )
         }
 
@@ -184,6 +193,9 @@ internal class LocalAdbClient(context: Context) : Closeable {
         const val READ_BUFFER_SIZE = 512
     }
 }
+
+private fun hasLocalAdbScanFinished(output: String): Boolean =
+    output.lineSequence().any { it.trim() == "__LOCAL_ADB_SCAN_DONE__" }
 
 private class LocalAdbConnectionManager(context: Context) : AbsAdbConnectionManager() {
     private val identity = LocalAdbIdentity.loadOrCreate(context.applicationContext)
