@@ -82,11 +82,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
-private enum class LocalAdbCheckState {
+internal enum class LocalAdbCheckState {
     NOT_RUN,
     PAIRING,
     PAIRING_SUCCESS,
@@ -102,12 +105,68 @@ private enum class LocalAdbCheckState {
     ID_FAILED
 }
 
+internal enum class LocalAdbReadIssue {
+    NONE,
+    STREAM_CLOSED,
+    END_OF_STREAM,
+    TIMEOUT,
+    IO_ERROR
+}
+
+internal data class LocalAdbUidCheckResult(
+    val idState: LocalAdbCheckState,
+    val output: String,
+    val uidVerified: Boolean,
+    val uidStatus: String,
+    val errorMessage: String?
+)
+
+private const val MAX_ID_OUTPUT_CHARS = 1024
+private val UID_NUMBER_PATTERN = Regex("(?:^|\\s)uid=(\\d+)\\b")
+private val COMPLETE_UID_FIELD_PATTERN = Regex("(?:^|\\s)uid=\\d+(?:\\([^)]+\\))?\\s")
+
 internal fun isShellUid2000(output: String): Boolean =
     Regex("(?:^|\\s)uid=2000\\(shell\\)(?:\\s|$)").containsMatchIn(output.trim())
 
 private fun actualUidLabel(output: String): String {
-    val match = Regex("(?:^|\\s)uid=(\\d+)\\(([^)]*)\\)").find(output.trim())
-    return match?.let { "${it.groupValues[1]} (${it.groupValues[2]})" } ?: "未识别"
+    val match = Regex("(?:^|\\s)uid=(\\d+)\\b(?:\\(([^)]*)\\))?").find(output.trim())
+    return match?.let {
+        val name = it.groupValues[2]
+        if (name.isBlank()) it.groupValues[1] else "${it.groupValues[1]} ($name)"
+    } ?: "未识别"
+}
+
+internal fun evaluateLocalAdbUidCheck(
+    output: String,
+    readIssue: LocalAdbReadIssue = LocalAdbReadIssue.NONE,
+    readFailureSummary: String? = null
+): LocalAdbUidCheckResult {
+    val displayOutput = output.take(MAX_ID_OUTPUT_CHARS).trim()
+    val actualUid = actualUidLabel(displayOutput)
+    val receivedUid = UID_NUMBER_PATTERN.containsMatchIn(displayOutput)
+    val verified = receivedUid && isShellUid2000(displayOutput)
+    val failure = if (receivedUid) {
+        null
+    } else {
+        readFailureSummary ?: when (readIssue) {
+            LocalAdbReadIssue.STREAM_CLOSED -> "IOException: Stream closed."
+            LocalAdbReadIssue.END_OF_STREAM -> "EOF: Stream ended before a UID was received."
+            LocalAdbReadIssue.TIMEOUT -> "Timeout: No UID output arrived within 5 seconds."
+            LocalAdbReadIssue.IO_ERROR -> "IOException: Failed to read id output."
+            LocalAdbReadIssue.NONE -> "The id command returned no recognizable UID."
+        }
+    }
+    return LocalAdbUidCheckResult(
+        idState = if (receivedUid) ID_EXECUTED else ID_FAILED,
+        output = displayOutput,
+        uidVerified = verified,
+        uidStatus = when {
+            verified -> "UID_2000_VERIFIED"
+            receivedUid -> "UID_2000_NOT_VERIFIED（实际 UID：$actualUid）"
+            else -> "UID_2000_NOT_VERIFIED（未收到 UID）"
+        },
+        errorMessage = failure
+    )
 }
 
 private fun safeFailure(error: Exception, secret: String? = null): String {
@@ -225,22 +284,18 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 }
                 shellState = SHELL_OPENED
 
-                val output = withContext(Dispatchers.IO) {
+                val readResult = withContext(Dispatchers.IO) {
                     session.readIdOutput(stream)
-                }.trim()
-                if (output.isBlank()) {
-                    idState = ID_FAILED
-                    uidState = "UID_2000_NOT_VERIFIED（id 没有输出）"
-                    lastError = "固定命令 id 没有返回输出。"
-                } else {
-                    idOutput = output
-                    idState = ID_EXECUTED
-                    uidState = if (isShellUid2000(output)) {
-                        "UID_2000_VERIFIED"
-                    } else {
-                        "UID_2000_NOT_VERIFIED（实际 UID：${actualUidLabel(output)}）"
-                    }
                 }
+                val result = evaluateLocalAdbUidCheck(
+                    readResult.output,
+                    readResult.issue,
+                    readResult.failureSummary
+                )
+                idOutput = result.output
+                idState = result.idState
+                uidState = result.uidStatus
+                lastError = result.errorMessage
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (exception: Exception) {
@@ -348,22 +403,64 @@ private class LocalAdbSmokeSession(context: Context) : Closeable {
         return manager.connect(LOOPBACK, port)
     }
 
-    fun openIdShell(): AdbStream = manager().openStream("shell:id")
+    fun openIdShell(): AdbStream = manager().openStream("shell:")
 
-    fun readIdOutput(stream: AdbStream): String {
+    suspend fun readIdOutput(stream: AdbStream): RawIdOutput {
+        val output = ByteArrayOutputStream()
+        var issue = LocalAdbReadIssue.NONE
+        var failureSummary: String? = null
         try {
-            return stream.openInputStream().bufferedReader(Charsets.UTF_8).use { reader ->
-                val output = StringBuilder()
-                while (output.length < MAX_ID_OUTPUT_CHARS) {
-                    val line = reader.readLine() ?: break
-                    if (output.isNotEmpty()) output.append('\n')
-                    output.append(line.take(MAX_ID_OUTPUT_CHARS - output.length))
-                }
-                output.toString()
+            withContext(Dispatchers.IO) {
+                val commandOutput = stream.openOutputStream()
+                commandOutput.write("id\n".toByteArray(Charsets.UTF_8))
+                commandOutput.flush()
             }
+            val input = stream.openInputStream()
+            withTimeout(ID_READ_TIMEOUT_MS) {
+                withContext(Dispatchers.IO) {
+                    val buffer = ByteArray(READ_BUFFER_SIZE)
+                    while (output.size() < MAX_ID_OUTPUT_CHARS) {
+                        val available = input.available()
+                        if (available <= 0) {
+                            if (stream.isClosed) {
+                                issue = LocalAdbReadIssue.STREAM_CLOSED
+                                failureSummary = "IOException: Stream closed."
+                                break
+                            }
+                            delay(READ_POLL_INTERVAL_MS)
+                            continue
+                        }
+                        val count = input.read(
+                            buffer,
+                            0,
+                            minOf(available, buffer.size, MAX_ID_OUTPUT_CHARS - output.size())
+                        )
+                        if (count < 0) {
+                            issue = LocalAdbReadIssue.END_OF_STREAM
+                            break
+                        }
+                        output.write(buffer, 0, count)
+                        if (hasCompleteUidField(output.toString(Charsets.UTF_8.name()))) break
+                    }
+                }
+            }
+        } catch (timeout: TimeoutCancellationException) {
+            issue = LocalAdbReadIssue.TIMEOUT
+            failureSummary = safeFailure(timeout).replace("：", ":")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (exception: IOException) {
+            val isStreamClosed = exception.message.orEmpty().contains("stream closed", ignoreCase = true)
+            issue = if (isStreamClosed) {
+                LocalAdbReadIssue.STREAM_CLOSED
+            } else {
+                LocalAdbReadIssue.IO_ERROR
+            }
+            failureSummary = safeFailure(exception).replace("：", ":")
         } finally {
             runCatching { stream.close() }
         }
+        return RawIdOutput(output.toString(Charsets.UTF_8.name()), issue, failureSummary)
     }
 
     @Synchronized
@@ -374,9 +471,20 @@ private class LocalAdbSmokeSession(context: Context) : Closeable {
 
     companion object {
         private const val LOOPBACK = "127.0.0.1"
-        private const val MAX_ID_OUTPUT_CHARS = 1024
+        private const val ID_READ_TIMEOUT_MS = 5_000L
+        private const val READ_POLL_INTERVAL_MS = 25L
+        private const val READ_BUFFER_SIZE = 256
     }
 }
+
+private data class RawIdOutput(
+    val output: String,
+    val issue: LocalAdbReadIssue,
+    val failureSummary: String?
+)
+
+internal fun hasCompleteUidField(output: String): Boolean =
+    COMPLETE_UID_FIELD_PATTERN.containsMatchIn(output)
 
 private class LocalAdbConnectionManager(context: Context) : AbsAdbConnectionManager() {
     private val identity = LocalAdbIdentity.loadOrCreate(context.applicationContext)
