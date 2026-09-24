@@ -276,7 +276,7 @@ internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, 
         if (BuildConfig.DEBUG) {
             SectionLabel("开发调试")
             ListGroup {
-                ListRow("Local ADB 最小验证", "Wireless Debugging 配对与 shell id", onLocalAdbSmokeClick)
+                ListRow("Local ADB 只读验证", "连接确认与 WebView socket 发现", onLocalAdbSmokeClick)
             }
         }
         Spacer(Modifier.weight(1f))

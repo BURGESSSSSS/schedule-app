@@ -1,8 +1,5 @@
 package com.burgess.schedule.school.sync.localadb
 
-import android.content.Context
-import android.os.Build
-import android.util.AtomicFile
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -34,6 +31,8 @@ import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.PAIRING_SUCC
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_FAILED
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_OPENED
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_OPENING
+import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand.ID
+import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand.WEBVIEW_SOCKET_SCAN
 import com.burgess.schedule.ui.components.AppCard
 import com.burgess.schedule.ui.components.PillButton
 import com.burgess.schedule.ui.components.PillStyle
@@ -42,52 +41,13 @@ import com.burgess.schedule.ui.components.SubPageScaffold
 import com.burgess.schedule.ui.theme.AppSpace
 import com.burgess.schedule.ui.theme.AppType
 import com.burgess.schedule.ui.theme.LocalAppColors
-import io.github.muntashirakon.adb.AbsAdbConnectionManager
-import io.github.muntashirakon.adb.AdbStream
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
-import java.io.Closeable
-import java.io.DataInputStream
-import java.io.DataOutputStream
-import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
-import java.security.KeyFactory
-import java.security.KeyPair
-import java.security.KeyPairGenerator
-import java.security.PrivateKey
-import java.security.SecureRandom
-import java.security.cert.Certificate
-import java.security.cert.CertificateFactory
-import java.security.cert.X509Certificate
-import java.security.spec.PKCS8EncodedKeySpec
-import java.util.Date
-import java.util.concurrent.TimeUnit
-import android.sun.security.x509.AlgorithmId
-import android.sun.security.x509.CertificateAlgorithmId
-import android.sun.security.x509.CertificateExtensions
-import android.sun.security.x509.CertificateIssuerName
-import android.sun.security.x509.CertificateSerialNumber
-import android.sun.security.x509.CertificateSubjectName
-import android.sun.security.x509.CertificateValidity
-import android.sun.security.x509.CertificateVersion
-import android.sun.security.x509.CertificateX509Key
-import android.sun.security.x509.KeyIdentifier
-import android.sun.security.x509.PrivateKeyUsageExtension
-import android.sun.security.x509.SubjectKeyIdentifierExtension
-import android.sun.security.x509.X500Name
-import android.sun.security.x509.X509CertImpl
-import android.sun.security.x509.X509CertInfo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 
 internal enum class LocalAdbCheckState {
     NOT_RUN,
@@ -113,6 +73,13 @@ internal enum class LocalAdbReadIssue {
     IO_ERROR
 }
 
+internal enum class WebViewSocketScanState {
+    NOT_RUN,
+    SCANNING,
+    SCAN_SUCCESS,
+    SCAN_FAILED
+}
+
 internal data class LocalAdbUidCheckResult(
     val idState: LocalAdbCheckState,
     val output: String,
@@ -124,6 +91,9 @@ internal data class LocalAdbUidCheckResult(
 private const val MAX_ID_OUTPUT_CHARS = 1024
 private val UID_NUMBER_PATTERN = Regex("(?:^|\\s)uid=(\\d+)\\b")
 private val COMPLETE_UID_FIELD_PATTERN = Regex("(?:^|\\s)uid=\\d+(?:\\([^)]+\\))?\\s")
+
+internal fun hasCompleteUidField(output: String): Boolean =
+    COMPLETE_UID_FIELD_PATTERN.containsMatchIn(output)
 
 internal fun isShellUid2000(output: String): Boolean =
     Regex("(?:^|\\s)uid=2000\\(shell\\)(?:\\s|$)").containsMatchIn(output.trim())
@@ -181,7 +151,7 @@ private fun safeFailure(error: Exception, secret: String? = null): String {
 internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current.applicationContext
-    val session = remember(context) { LocalAdbSmokeSession(context) }
+    val client = remember(context) { LocalAdbClient(context) }
     val operationScope = rememberCoroutineScope()
     val colors = LocalAppColors.current
 
@@ -195,14 +165,17 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var idState by remember { mutableStateOf(NOT_RUN) }
     var idOutput by remember { mutableStateOf("") }
     var uidState by remember { mutableStateOf("未验证") }
+    var uidVerified by remember { mutableStateOf(false) }
+    var socketScanState by remember { mutableStateOf(WebViewSocketScanState.NOT_RUN) }
+    var webViewSocketNames by remember { mutableStateOf(emptyList<String>()) }
     var lastError by remember { mutableStateOf<String?>(null) }
 
-    DisposableEffect(session) {
+    DisposableEffect(client) {
         onDispose {
             val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             cleanupScope.launch {
                 try {
-                    session.close()
+                    client.close()
                 } catch (_: Exception) {
                     // The one-shot PoC has no background connection after the page is closed.
                 } finally {
@@ -230,12 +203,13 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         idState = NOT_RUN
         idOutput = ""
         uidState = "未验证"
+        uidVerified = false
+        socketScanState = WebViewSocketScanState.NOT_RUN
+        webViewSocketNames = emptyList()
         busy = true
         operationScope.launch {
             try {
-                val paired = withContext(Dispatchers.IO) {
-                    session.pair(port, submittedCode)
-                }
+                val paired = client.pair(port, submittedCode)
                 if (paired) {
                     pairingState = PAIRING_SUCCESS
                 } else {
@@ -268,25 +242,20 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         idState = NOT_RUN
         idOutput = ""
         uidState = "未验证"
+        uidVerified = false
+        socketScanState = WebViewSocketScanState.NOT_RUN
+        webViewSocketNames = emptyList()
         busy = true
         operationScope.launch {
             try {
-                val connected = withContext(Dispatchers.IO) {
-                    session.connect(port)
-                }
+                val connected = client.connect(port)
                 if (!connected) throw IOException("TLS connection was not established")
                 connectionState = ADB_CONNECTED
 
                 shellState = SHELL_OPENING
                 idState = ID_RUNNING
-                val stream = withContext(Dispatchers.IO) {
-                    session.openIdShell()
-                }
+                val readResult = client.executeReadOnly(ID)
                 shellState = SHELL_OPENED
-
-                val readResult = withContext(Dispatchers.IO) {
-                    session.readIdOutput(stream)
-                }
                 val result = evaluateLocalAdbUidCheck(
                     readResult.output,
                     readResult.issue,
@@ -295,6 +264,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 idOutput = result.output
                 idState = result.idState
                 uidState = result.uidStatus
+                uidVerified = result.uidVerified
                 lastError = result.errorMessage
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -312,7 +282,59 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         }
     }
 
-    SubPageScaffold("Local ADB 最小验证", onBack) {
+    fun scanWebViewSockets() {
+        if (busy) return
+        if (!uidVerified) {
+            lastError = "请先运行 id 并验证 UID 2000，再扫描 WebView sockets。"
+            socketScanState = WebViewSocketScanState.SCAN_FAILED
+            return
+        }
+        val port = connectPort.toIntOrNull()
+        if (port == null || port !in 1..65535) {
+            lastError = "请输入 Wireless Debugging 主页面显示的有效连接端口。"
+            connectionState = ADB_CONNECTION_FAILED
+            socketScanState = WebViewSocketScanState.SCAN_FAILED
+            return
+        }
+
+        lastError = null
+        webViewSocketNames = emptyList()
+        socketScanState = WebViewSocketScanState.SCANNING
+        connectionState = ADB_CONNECTING
+        busy = true
+        operationScope.launch {
+            try {
+                val connected = client.connect(port)
+                if (!connected) throw IOException("TLS connection was not established")
+                connectionState = ADB_CONNECTED
+
+                shellState = SHELL_OPENING
+                val scanOutput = client.executeReadOnly(WEBVIEW_SOCKET_SCAN)
+                if (scanOutput.issue != LocalAdbReadIssue.NONE) {
+                    throw IOException(scanOutput.failureSummary ?: "WebView socket scan did not complete.")
+                }
+                val exitCode = scanOutput.exitCode
+                if (exitCode == null || exitCode !in 0..1) {
+                    throw IOException("WebView socket scan failed (exit code ${exitCode ?: "unknown"}).")
+                }
+
+                shellState = SHELL_OPENED
+                webViewSocketNames = parseWebViewSocketNames(scanOutput.output)
+                socketScanState = WebViewSocketScanState.SCAN_SUCCESS
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                if (connectionState == ADB_CONNECTING) connectionState = ADB_CONNECTION_FAILED
+                if (shellState == SHELL_OPENING) shellState = SHELL_FAILED
+                socketScanState = WebViewSocketScanState.SCAN_FAILED
+                lastError = safeFailure(exception)
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    SubPageScaffold("Local ADB / WebView sockets", onBack) {
         Text(
             "只连接本机 127.0.0.1。你需要在系统 Wireless Debugging 页面手动配对；本页不会打开或更改系统设置。",
             style = AppType.body,
@@ -351,9 +373,9 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             Text("配对状态：${pairingState.name}", style = AppType.caption, color = colors.mut)
         }
 
-        SectionLabel("步骤 2 · TLS 连接并执行唯一命令")
+        SectionLabel("步骤 2 · TLS 连接与 UID 验证")
         AppCard(Modifier.fillMaxWidth()) {
-            Text("回到 Wireless Debugging 主页面，填写当前显示的连接端口。连接成功后本页只运行 id。", style = AppType.body, color = colors.ink)
+            Text("回到 Wireless Debugging 主页面，填写当前显示的连接端口。连接后可运行 id 确认 UID。", style = AppType.body, color = colors.ink)
             OutlinedTextField(
                 value = connectPort,
                 onValueChange = { connectPort = it.filter(Char::isDigit).take(5) },
@@ -363,7 +385,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
             )
             PillButton(
-                if (busy && connectionState == ADB_CONNECTING) "连接并执行中…" else "连接并只运行 id",
+                if (busy && connectionState == ADB_CONNECTING) "连接并执行中…" else "连接并运行 id",
                 onClick = ::connectAndRunId,
                 style = PillStyle.Primary
             )
@@ -377,222 +399,38 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
 
+        SectionLabel("步骤 3 · 只读扫描 WebView sockets")
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
-                Text("密钥只保存在 App 私有目录。配对码不会保存或写入日志。", style = AppType.caption, color = colors.mut)
-                if (lastError != null) Text("错误：$lastError", style = AppType.caption, color = colors.danger)
-            }
-        }
-    }
-}
-
-private class LocalAdbSmokeSession(context: Context) : Closeable {
-    private val appContext = context.applicationContext
-    private var connectionManager: LocalAdbConnectionManager? = null
-
-    @Synchronized
-    private fun manager(): LocalAdbConnectionManager = connectionManager
-        ?: LocalAdbConnectionManager(appContext).also { connectionManager = it }
-
-    fun pair(port: Int, pairingCode: String): Boolean =
-        manager().pair(LOOPBACK, port, pairingCode)
-
-    fun connect(port: Int): Boolean {
-        val manager = manager()
-        if (manager.isConnected) return true
-        return manager.connect(LOOPBACK, port)
-    }
-
-    fun openIdShell(): AdbStream = manager().openStream("shell:")
-
-    suspend fun readIdOutput(stream: AdbStream): RawIdOutput {
-        val output = ByteArrayOutputStream()
-        var issue = LocalAdbReadIssue.NONE
-        var failureSummary: String? = null
-        try {
-            withContext(Dispatchers.IO) {
-                val commandOutput = stream.openOutputStream()
-                commandOutput.write("id\n".toByteArray(Charsets.UTF_8))
-                commandOutput.flush()
-            }
-            val input = stream.openInputStream()
-            withTimeout(ID_READ_TIMEOUT_MS) {
-                withContext(Dispatchers.IO) {
-                    val buffer = ByteArray(READ_BUFFER_SIZE)
-                    while (output.size() < MAX_ID_OUTPUT_CHARS) {
-                        val available = input.available()
-                        if (available <= 0) {
-                            if (stream.isClosed) {
-                                issue = LocalAdbReadIssue.STREAM_CLOSED
-                                failureSummary = "IOException: Stream closed."
-                                break
-                            }
-                            delay(READ_POLL_INTERVAL_MS)
-                            continue
+                Text(
+                    "只筛选 /proc/net/unix 中名称含 webview_devtools_remote 的 socket。不会连接 socket 或读取页面内容。",
+                    style = AppType.body,
+                    color = colors.ink
+                )
+                PillButton(
+                    if (busy && socketScanState == WebViewSocketScanState.SCANNING) "扫描中…" else "扫描 WebView sockets",
+                    onClick = ::scanWebViewSockets,
+                    style = PillStyle.Primary
+                )
+                Text("扫描状态：${socketScanState.name}", style = AppType.caption, color = colors.mut)
+                if (socketScanState == WebViewSocketScanState.SCAN_SUCCESS) {
+                    Text("WebView sockets：发现 ${webViewSocketNames.size} 个", style = AppType.caption, color = colors.ink)
+                    if (webViewSocketNames.isEmpty()) {
+                        Text("没有发现匹配的 socket。", style = AppType.caption, color = colors.mut)
+                    } else {
+                        webViewSocketNames.forEach { socketName ->
+                            Text(socketName, style = AppType.caption, color = colors.ink)
                         }
-                        val count = input.read(
-                            buffer,
-                            0,
-                            minOf(available, buffer.size, MAX_ID_OUTPUT_CHARS - output.size())
-                        )
-                        if (count < 0) {
-                            issue = LocalAdbReadIssue.END_OF_STREAM
-                            break
-                        }
-                        output.write(buffer, 0, count)
-                        if (hasCompleteUidField(output.toString(Charsets.UTF_8.name()))) break
                     }
                 }
             }
-        } catch (timeout: TimeoutCancellationException) {
-            issue = LocalAdbReadIssue.TIMEOUT
-            failureSummary = safeFailure(timeout).replace("：", ":")
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (exception: IOException) {
-            val isStreamClosed = exception.message.orEmpty().contains("stream closed", ignoreCase = true)
-            issue = if (isStreamClosed) {
-                LocalAdbReadIssue.STREAM_CLOSED
-            } else {
-                LocalAdbReadIssue.IO_ERROR
-            }
-            failureSummary = safeFailure(exception).replace("：", ":")
-        } finally {
-            runCatching { stream.close() }
-        }
-        return RawIdOutput(output.toString(Charsets.UTF_8.name()), issue, failureSummary)
-    }
-
-    @Synchronized
-    override fun close() {
-        connectionManager?.close()
-        connectionManager = null
-    }
-
-    companion object {
-        private const val LOOPBACK = "127.0.0.1"
-        private const val ID_READ_TIMEOUT_MS = 5_000L
-        private const val READ_POLL_INTERVAL_MS = 25L
-        private const val READ_BUFFER_SIZE = 256
-    }
-}
-
-private data class RawIdOutput(
-    val output: String,
-    val issue: LocalAdbReadIssue,
-    val failureSummary: String?
-)
-
-internal fun hasCompleteUidField(output: String): Boolean =
-    COMPLETE_UID_FIELD_PATTERN.containsMatchIn(output)
-
-private class LocalAdbConnectionManager(context: Context) : AbsAdbConnectionManager() {
-    private val identity = LocalAdbIdentity.loadOrCreate(context.applicationContext)
-
-    init {
-        setApi(Build.VERSION.SDK_INT)
-        setTimeout(15, TimeUnit.SECONDS)
-        setThrowOnUnauthorised(true)
-    }
-
-    override fun getPrivateKey(): PrivateKey = identity.privateKey
-
-    override fun getCertificate(): Certificate = identity.certificate
-
-    override fun getDeviceName(): String = "ScheduleLocalAdbPoC"
-}
-
-private data class LocalAdbIdentity(
-    val privateKey: PrivateKey,
-    val certificate: X509Certificate
-) {
-    companion object {
-        private const val IDENTITY_FILE = "adb-identity.bin"
-        private const val MAX_KEY_BYTES = 16 * 1024
-        private const val MAX_CERT_BYTES = 64 * 1024
-
-        fun loadOrCreate(context: Context): LocalAdbIdentity {
-            val directory = File(context.filesDir, "local-adb")
-            if (!directory.exists() && !directory.mkdirs()) {
-                throw IOException("Could not create App-private Local ADB directory")
-            }
-            val file = File(directory, IDENTITY_FILE)
-            if (file.exists()) return read(file)
-
-            val keyPairGenerator = KeyPairGenerator.getInstance("RSA")
-            keyPairGenerator.initialize(2048, SecureRandom())
-            val keyPair = keyPairGenerator.generateKeyPair()
-            val certificate = createCertificate(keyPair)
-            val payload = ByteArrayOutputStream().use { bytes ->
-                DataOutputStream(bytes).use { data ->
-                    data.writeInt(keyPair.private.encoded.size)
-                    data.write(keyPair.private.encoded)
-                    data.writeInt(certificate.encoded.size)
-                    data.write(certificate.encoded)
-                }
-                bytes.toByteArray()
-            }
-            writeAtomically(file, payload)
-            return LocalAdbIdentity(keyPair.private, certificate)
         }
 
-        private fun read(file: File): LocalAdbIdentity {
-            val input = DataInputStream(ByteArrayInputStream(AtomicFile(file).openRead().use { it.readBytes() }))
-            input.use { data ->
-                val keySize = data.readInt()
-                require(keySize in 1..MAX_KEY_BYTES) { "Stored Local ADB key is invalid" }
-                val keyBytes = ByteArray(keySize).also { data.readFully(it) }
-                val certificateSize = data.readInt()
-                require(certificateSize in 1..MAX_CERT_BYTES) { "Stored Local ADB certificate is invalid" }
-                val certificateBytes = ByteArray(certificateSize).also { data.readFully(it) }
-                require(data.available() == 0) { "Stored Local ADB identity has unexpected data" }
-                val privateKey = KeyFactory.getInstance("RSA")
-                    .generatePrivate(PKCS8EncodedKeySpec(keyBytes))
-                val certificate = CertificateFactory.getInstance("X.509")
-                    .generateCertificate(ByteArrayInputStream(certificateBytes)) as X509Certificate
-                return LocalAdbIdentity(privateKey, certificate)
+        AppCard(Modifier.fillMaxWidth()) {
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+                Text("密钥保存在 App 私有目录。配对码不会保存或写入日志。扫描只在点击按钮后执行。", style = AppType.caption, color = colors.mut)
+                if (lastError != null) Text("错误：$lastError", style = AppType.caption, color = colors.danger)
             }
-        }
-
-        private fun writeAtomically(file: File, payload: ByteArray) {
-            val atomicFile = AtomicFile(file)
-            var output: FileOutputStream? = null
-            try {
-                output = atomicFile.startWrite()
-                output.write(payload)
-                output.fd.sync()
-                atomicFile.finishWrite(output)
-                output = null
-            } catch (exception: Exception) {
-                output?.let(atomicFile::failWrite)
-                throw exception
-            }
-        }
-
-        private fun createCertificate(keyPair: KeyPair): X509Certificate {
-            val now = System.currentTimeMillis()
-            val notBefore = Date(now - TimeUnit.MINUTES.toMillis(1))
-            val notAfter = Date(now + TimeUnit.DAYS.toMillis(3650))
-            val algorithmName = "SHA512withRSA"
-            val subject = X500Name("CN=ScheduleLocalAdbPoC")
-            val extensions = CertificateExtensions().apply {
-                set(
-                    "SubjectKeyIdentifier",
-                    SubjectKeyIdentifierExtension(KeyIdentifier(keyPair.public).identifier)
-                )
-                set("PrivateKeyUsage", PrivateKeyUsageExtension(notBefore, notAfter))
-            }
-            val certificateInfo = X509CertInfo().apply {
-                set("version", CertificateVersion(2))
-                set("serialNumber", CertificateSerialNumber((SecureRandom().nextInt() and Int.MAX_VALUE).coerceAtLeast(1)))
-                set("algorithmID", CertificateAlgorithmId(AlgorithmId.get(algorithmName)))
-                set("subject", CertificateSubjectName(subject))
-                set("key", CertificateX509Key(keyPair.public))
-                set("validity", CertificateValidity(notBefore, notAfter))
-                set("issuer", CertificateIssuerName(subject))
-                set("extensions", extensions)
-            }
-            return X509CertImpl(certificateInfo).apply { sign(keyPair.private, algorithmName) }
         }
     }
 }
