@@ -99,15 +99,15 @@ internal data class LocalAdbCommandOutput(
 
 internal data class SentinelCommandPayload(
     val output: String,
-    val exitCode: Int?
+    val exitCode: Int
 )
 
 internal class SentinelCommandBuffer(
     private val sentinel: String,
-    private val exitMarker: String,
     val outputLimit: Int
 ) {
     private val bytes = ByteArrayOutputStream()
+    private val sentinelPattern = Regex("(?m)^${Regex.escape(sentinel)}:(\\d+)\\r?\\n")
 
     val size: Int
         get() = bytes.size()
@@ -115,11 +115,9 @@ internal class SentinelCommandBuffer(
     val hasOutput: Boolean
         get() {
             val content = snapshot()
-            val endOfCommandOutput = listOf(
-                content.indexOf(exitMarker),
-                Regex("(?m)^${Regex.escape(sentinel)}\\r?$").find(content)?.range?.first ?: -1
-            ).filter { it >= 0 }.minOrNull() ?: -1
-            val commandOutput = if (endOfCommandOutput >= 0) {
+            val endOfCommandOutput = sentinelPattern.find(content)?.range?.first
+                ?: content.indexOf(sentinel).takeIf { it >= 0 }
+            val commandOutput = if (endOfCommandOutput != null) {
                 content.substring(0, endOfCommandOutput).removeOneProtocolNewline()
             } else {
                 content
@@ -138,19 +136,10 @@ internal class SentinelCommandBuffer(
 
     private fun completedPayload(): SentinelCommandPayload? {
         val content = snapshot()
-        val sentinelPattern = Regex("(?m)^${Regex.escape(sentinel)}\\r?$")
-        val sentinelMatch = sentinelPattern.find(content) ?: return null
-        var prefix = content.substring(0, sentinelMatch.range.first).removeOneProtocolNewline()
-
-        val exitPattern = Regex("(?m)^${Regex.escape(exitMarker)}\\|(-?\\d+)\\r?$")
-        val exitMatch = exitPattern.findAll(prefix).lastOrNull()
-        if (exitMatch == null || prefix.substring(exitMatch.range.last + 1).any { it != '\n' && it != '\r' }) {
-            return SentinelCommandPayload(prefix, null)
-        }
-
-        val exitCode = exitMatch.groupValues[1].toIntOrNull()
-        prefix = prefix.substring(0, exitMatch.range.first).removeOneProtocolNewline()
-        return SentinelCommandPayload(prefix, exitCode)
+        val match = sentinelPattern.find(content) ?: return null
+        val exitCode = match.groupValues[1].toIntOrNull() ?: return null
+        val output = content.substring(0, match.range.first).removeOneProtocolNewline()
+        return SentinelCommandPayload(output, exitCode)
     }
 
     private fun String.removeOneProtocolNewline(): String = when {
@@ -200,22 +189,19 @@ internal fun newSentinelId(): String = UUID.randomUUID().toString().replace("-",
 
 internal fun wrapWithCommandSentinel(command: LocalAdbReadOnlyCommand, sentinelId: String): WrappedShellCommand {
     require(sentinelId.matches(Regex("[A-Fa-f0-9]{32}"))) { "Sentinel id must be a UUID hex string" }
-    val sentinel = "__BURGESS_CMD_DONE_${sentinelId}__"
-    val exitMarker = "__BURGESS_CMD_EXIT_${sentinelId}__"
+    val sentinel = "__BURGESS_DONE_${sentinelId}__"
     val input = buildString {
         append(command.shellCommand.trimEnd('\n', '\r'))
         append('\n')
-        append("__burgess_status=\$?\n")
-        append("printf '\\n$exitMarker|%s\\n' \"\$__burgess_status\"\n")
-        append("printf '\\n$sentinel\\n'\n")
+        append("__burgess_rc=\$?\n")
+        append("printf '\\n$sentinel:%d\\n' \"\$__burgess_rc\"\n")
     }
-    return WrappedShellCommand(input, sentinel, exitMarker)
+    return WrappedShellCommand(input, sentinel)
 }
 
 internal data class WrappedShellCommand(
     val input: String,
-    val sentinel: String,
-    val exitMarker: String
+    val sentinel: String
 )
 
 private const val DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024

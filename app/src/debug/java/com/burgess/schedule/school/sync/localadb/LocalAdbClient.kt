@@ -74,7 +74,6 @@ internal class LocalAdbClient(context: Context) : Closeable {
             val wrappedCommand = wrapWithCommandSentinel(command, newSentinelId())
             val buffer = SentinelCommandBuffer(
                 sentinel = wrappedCommand.sentinel,
-                exitMarker = wrappedCommand.exitMarker,
                 outputLimit = command.outputLimit
             )
             try {
@@ -93,17 +92,12 @@ internal class LocalAdbClient(context: Context) : Closeable {
                         is SentinelReadOutcome.Completed -> {
                             commandCompleted = true
                             output = readResult.payload.output
-                            exitCode = readResult.payload.exitCode
+                            val commandExitCode = readResult.payload.exitCode
+                            exitCode = commandExitCode
                             partialOutputReceived = buffer.hasOutput
-                            when {
-                                exitCode == null -> {
-                                    issue = LocalAdbReadIssue.PROTOCOL_ERROR
-                                    failureSummary = "${command.safeLabel}: completion sentinel arrived without an exit status."
-                                }
-                                exitCode != 0 -> {
-                                    issue = LocalAdbReadIssue.COMMAND_FAILED
-                                    failureSummary = "${command.safeLabel}: command exited with status $exitCode."
-                                }
+                            if (commandExitCode != 0) {
+                                issue = LocalAdbReadIssue.COMMAND_FAILED
+                                failureSummary = "${command.safeLabel}: command exited with status $commandExitCode."
                             }
                         }
                         is SentinelReadOutcome.StreamClosed -> {
