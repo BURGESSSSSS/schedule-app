@@ -2,17 +2,31 @@ package com.burgess.schedule.school.sync.localadb
 
 import java.util.Locale
 
+internal enum class ProcUnixScanState {
+    PROC_UNIX_START,
+    PROC_UNIX_SUCCESS,
+    PROC_UNIX_FAILED
+}
+
+internal enum class ProcessQueryScanState {
+    PROCESS_QUERY_START,
+    PROCESS_QUERY_SUCCESS,
+    PROCESS_QUERY_FAILED
+}
+
 internal enum class ProcFdScanState {
-    ENUMERATED,
-    PERMISSION_DENIED,
-    PROCESS_DISAPPEARED,
-    NOT_SCANNED
+    FD_SCAN_START,
+    FD_SCAN_SUCCESS,
+    FD_SCAN_PERMISSION_DENIED,
+    FD_SCAN_FAILED
 }
 
 internal enum class ProcMapsScanState {
-    READABLE,
-    READ_FAILED,
-    NOT_SCANNED
+    NOT_SCANNED,
+    MAPS_SCAN_START,
+    MAPS_SCAN_SUCCESS,
+    MAPS_SCAN_PERMISSION_DENIED,
+    MAPS_SCAN_FAILED
 }
 
 internal enum class WebViewKernelKind(val displayName: String) {
@@ -29,9 +43,26 @@ internal data class UnixSocketStats(
     val abstractSockets: Int
 )
 
+internal data class ProcUnixTableResult(
+    val state: ProcUnixScanState,
+    val stats: UnixSocketStats?,
+    val socketNamesByInode: Map<Long, String?>
+)
+
 internal data class WeWorkProcess(
     val pid: Int,
     val processName: String
+)
+
+internal data class ProcessQueryResult(
+    val state: ProcessQueryScanState,
+    val processes: List<WeWorkProcess>
+)
+
+internal data class ProcFdScanResult(
+    val pid: Int,
+    val state: ProcFdScanState,
+    val socketInodes: List<Long>
 )
 
 internal data class OwnedUnixSocket(
@@ -43,6 +74,12 @@ internal data class OwnedUnixSocket(
 internal data class WebViewKernelLibrary(
     val basename: String,
     val keywords: Set<String>
+)
+
+internal data class ProcMapsScanResult(
+    val pid: Int,
+    val state: ProcMapsScanState,
+    val libraries: List<WebViewKernelLibrary>
 )
 
 internal data class WeWorkProcessAudit(
@@ -61,9 +98,15 @@ internal data class OwnedSocketReference(
 internal data class LocalAdbScanSnapshot(
     val stats: UnixSocketStats?,
     val processes: List<WeWorkProcessAudit>,
-    val procUnixReadFailed: Boolean,
+    val procUnixState: ProcUnixScanState,
+    val processQueryState: ProcessQueryScanState
+) {
+    val procUnixReadFailed: Boolean
+        get() = procUnixState != ProcUnixScanState.PROC_UNIX_SUCCESS
+
     val processQueryFailed: Boolean
-)
+        get() = processQueryState != ProcessQueryScanState.PROCESS_QUERY_SUCCESS
+}
 
 internal enum class SocketOwnershipClassification {
     OWNED_DEVTOOLS_SOCKET_FOUND,
@@ -77,99 +120,157 @@ internal enum class SocketOwnershipClassification {
 }
 
 private const val TARGET_PROCESS = "com.tencent.wework"
-private val SUMMARY_PATTERN = Regex("^__PROC_UNIX_SUMMARY__\\|(\\d+)\\|(\\d+)\\|(\\d+)$")
-private val PROC_EXIT_PATTERN = Regex("^__PROC_UNIX_EXIT__\\|(\\d+)$")
-private val PROCESS_PATTERN = Regex("^__WXWORK_PROCESS__\\|(\\d+)\\|(.+)$")
-private val FD_SOCKET_PATTERN = Regex("^__OWNED_SOCKET__\\|(\\d+)\\|(\\d+)\\|([01])\\|(.*)$")
-private val MAPS_LIBRARY_PATTERN = Regex("^__WX_MAPS_LIBRARY__\\|(\\d+)\\|([^|]+)\\|([^|]*)$")
+private val SOCKET_DEBUG_TOKENS = listOf("devtools", "xweb", "webview")
 private val MAPS_KEYWORDS = setOf("xweb", "webview", "chromium", "tbs", "x5")
+private val SOCKET_FD_PATTERN = Regex("^__FD_SOCKET__\\|(\\d+)\\|(\\d+)$")
+private val MAPS_LIBRARY_PATTERN = Regex("^__WX_MAPS_LIBRARY__\\|(\\d+)\\|([^|]+)\\|([^|]*)$")
 
 internal fun isWeWorkProcessName(processName: String): Boolean =
     processName == TARGET_PROCESS || processName.startsWith("$TARGET_PROCESS:")
 
-internal fun parseLocalAdbScanSnapshot(output: String): LocalAdbScanSnapshot {
-    val lines = output.lineSequence().map(String::trim).toList()
-    val stats = lines.mapNotNull { line ->
-        SUMMARY_PATTERN.matchEntire(line)?.let { match ->
-            UnixSocketStats(
-                totalLines = match.groupValues[1].toIntOrNull() ?: 0,
-                namedSockets = match.groupValues[2].toIntOrNull() ?: 0,
-                abstractSockets = match.groupValues[3].toIntOrNull() ?: 0
-            )
-        }
-    }.lastOrNull()
-    val procExitCode = lines.mapNotNull { line ->
-        PROC_EXIT_PATTERN.matchEntire(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
-    }.lastOrNull()
-    val scanCompleted = lines.any { it == "__LOCAL_ADB_SCAN_DONE__" }
-    val unixMapRead = lines.any { it == "__PROC_UNIX_MAP_OK__" }
-    val unixMapFailed = lines.any { it == "__PROC_UNIX_MAP_FAILED__" }
-    val procUnixReadFailed =
-        !scanCompleted || stats == null || stats.totalLines <= 0 || procExitCode != 0 || !unixMapRead || unixMapFailed
-    val processQueryFailed = lines.any { it == "__WXWORK_QUERY_FAILED__" } ||
-        lines.none { it == "__WXWORK_QUERY_DONE__" }
-
-    val processes = linkedMapOf<Int, MutableProcessAudit>()
-    lines.forEach { line ->
-        PROCESS_PATTERN.matchEntire(line)?.let { match ->
-            val pid = match.groupValues[1].toIntOrNull() ?: return@let
-            val name = match.groupValues[2]
-            if (pid > 0 && isWeWorkProcessName(name)) {
-                processes.putIfAbsent(pid, MutableProcessAudit(WeWorkProcess(pid, name)))
-            }
-        }
-    }
+internal fun parseProcUnixTable(output: String, exitCode: Int?): ProcUnixTableResult {
+    val lines = output.lineSequence().map { it.trimEnd('\r') }.filter(String::isNotBlank).toList()
+    val namesByInode = linkedMapOf<Long, String?>()
+    var headerFound = false
 
     lines.forEach { line ->
-        val fields = line.split('|')
-        val pid = fields.getOrNull(1)?.toIntOrNull()
-        when (fields.firstOrNull()) {
-            "__PROC_FD_OK__" -> pid?.let { processes[it]?.fdScanState = ProcFdScanState.ENUMERATED }
-            "__PROC_FD_PERMISSION_DENIED__", "__PROC_FD_ENTRY_UNREADABLE__" ->
-                pid?.let { processes[it]?.fdScanState = ProcFdScanState.PERMISSION_DENIED }
-            "__PROC_FD_PROCESS_GONE__" -> pid?.let { processes[it]?.fdScanState = ProcFdScanState.PROCESS_DISAPPEARED }
-            "__PROC_MAPS_READ_OK__" -> pid?.let { processes[it]?.mapsScanState = ProcMapsScanState.READABLE }
-            "__PROC_MAPS_READ_FAILED__" -> pid?.let { processes[it]?.mapsScanState = ProcMapsScanState.READ_FAILED }
-            else -> Unit
+        val columns = line.trim().split(Regex("\\s+"))
+        if (columns.firstOrNull().equals("Num", ignoreCase = true) && columns.getOrNull(6).equals("Inode", ignoreCase = true)) {
+            headerFound = true
+            return@forEach
         }
-
-        FD_SOCKET_PATTERN.matchEntire(line)?.let { match ->
-            val socketPid = match.groupValues[1].toIntOrNull() ?: return@let
-            val inode = match.groupValues[2].toLongOrNull() ?: return@let
-            processes[socketPid]?.sockets?.putIfAbsent(
-                inode,
-                OwnedUnixSocket(
-                    inode = inode,
-                    presentInProcUnix = match.groupValues[3] == "1",
-                    socketName = match.groupValues[4].ifBlank { null }
-                )
-            )
-        }
-
-        MAPS_LIBRARY_PATTERN.matchEntire(line)?.let { match ->
-            val mapsPid = match.groupValues[1].toIntOrNull() ?: return@let
-            val basename = match.groupValues[2]
-            val keywords = match.groupValues[3]
-                .split(',')
-                .map(String::trim)
-                .filter { it in MAPS_KEYWORDS }
-                .toSet()
-            if (basename.isNotBlank() && '/' !in basename && keywords.isNotEmpty()) {
-                processes[mapsPid]?.libraries?.putIfAbsent(
-                    basename.lowercase(Locale.ROOT),
-                    WebViewKernelLibrary(basename, keywords)
-                )
-            }
-        }
+        val inode = columns.getOrNull(6)?.toLongOrNull() ?: return@forEach
+        val name = columns.drop(7).joinToString(" ").ifBlank { null }
+        namesByInode[inode] = name
     }
 
-    return LocalAdbScanSnapshot(
+    val stats = if (headerFound) {
+        val names = namesByInode.values.filterNotNull()
+        UnixSocketStats(
+            totalLines = lines.size,
+            namedSockets = names.size,
+            abstractSockets = names.count { it.startsWith("@") }
+        )
+    } else {
+        null
+    }
+    val successful = exitCode == 0 && stats != null
+    return ProcUnixTableResult(
+        state = if (successful) ProcUnixScanState.PROC_UNIX_SUCCESS else ProcUnixScanState.PROC_UNIX_FAILED,
         stats = stats,
-        processes = processes.values.map(MutableProcessAudit::toImmutable),
-        procUnixReadFailed = procUnixReadFailed,
-        processQueryFailed = processQueryFailed
+        socketNamesByInode = if (successful) namesByInode else emptyMap()
     )
 }
+
+internal fun parseProcessQuery(output: String, exitCode: Int?): ProcessQueryResult {
+    var headerFound = false
+    val processes = linkedMapOf<Int, WeWorkProcess>()
+    output.lineSequence().map { it.trimEnd('\r') }.forEach { line ->
+        val columns = line.trim().split(Regex("\\s+"))
+        if (columns.size >= 2 && columns[0].equals("PID", ignoreCase = true) && columns[1].equals("NAME", ignoreCase = true)) {
+            headerFound = true
+            return@forEach
+        }
+        val pid = columns.firstOrNull()?.toIntOrNull() ?: return@forEach
+        val processName = columns.getOrNull(1).orEmpty()
+        if (pid > 0 && isWeWorkProcessName(processName)) {
+            processes.putIfAbsent(pid, WeWorkProcess(pid, processName))
+        }
+    }
+    val success = exitCode == 0 && headerFound
+    return ProcessQueryResult(
+        state = if (success) ProcessQueryScanState.PROCESS_QUERY_SUCCESS else ProcessQueryScanState.PROCESS_QUERY_FAILED,
+        processes = if (success) processes.values.toList() else emptyList()
+    )
+}
+
+internal fun parseProcessQueryForPackage(
+    output: String,
+    exitCode: Int?,
+    packageName: String
+): ProcessQueryResult {
+    require(packageName.isNotBlank() && ':' !in packageName)
+    val allProcesses = parseProcessQuery(output, exitCode)
+    if (allProcesses.state != ProcessQueryScanState.PROCESS_QUERY_SUCCESS) return allProcesses
+    val matches = output.lineSequence().map { it.trimEnd('\r') }.mapNotNull { line ->
+        val columns = line.trim().split(Regex("\\s+"))
+        val pid = columns.firstOrNull()?.toIntOrNull() ?: return@mapNotNull null
+        val processName = columns.getOrNull(1).orEmpty()
+        if (processName == packageName || processName.startsWith("$packageName:")) {
+            WeWorkProcess(pid, processName)
+        } else {
+            null
+        }
+    }.distinctBy { it.pid }.toList()
+    return allProcesses.copy(processes = matches)
+}
+
+internal fun parseProcFdScan(output: String, pid: Int, exitCode: Int?): ProcFdScanResult {
+    require(pid > 0)
+    val lines = output.lineSequence().map { it.trimEnd('\r').trim() }.toList()
+    val successMarker = "__FD_SCAN_SUCCESS__|$pid"
+    val permissionMarker = "__FD_SCAN_PERMISSION_DENIED__|$pid"
+    val isSuccess = successMarker in lines && exitCode == 0
+    val isDenied = permissionMarker in lines
+    val state = when {
+        isDenied -> ProcFdScanState.FD_SCAN_PERMISSION_DENIED
+        isSuccess -> ProcFdScanState.FD_SCAN_SUCCESS
+        else -> ProcFdScanState.FD_SCAN_FAILED
+    }
+    val inodes = if (state == ProcFdScanState.FD_SCAN_SUCCESS) {
+        lines.mapNotNull { line ->
+            SOCKET_FD_PATTERN.matchEntire(line)?.takeIf { it.groupValues[1].toIntOrNull() == pid }
+                ?.groupValues?.getOrNull(2)?.toLongOrNull()
+        }.distinct()
+    } else {
+        emptyList()
+    }
+    return ProcFdScanResult(pid, state, inodes)
+}
+
+internal fun parseProcMapsScan(output: String, pid: Int, exitCode: Int?): ProcMapsScanResult {
+    require(pid > 0)
+    val lines = output.lineSequence().map { it.trimEnd('\r').trim() }.toList()
+    val success = "__MAPS_SCAN_SUCCESS__|$pid" in lines && exitCode == 0
+    val denied = "__MAPS_SCAN_PERMISSION_DENIED__|$pid" in lines
+    val state = when {
+        denied -> ProcMapsScanState.MAPS_SCAN_PERMISSION_DENIED
+        success -> ProcMapsScanState.MAPS_SCAN_SUCCESS
+        else -> ProcMapsScanState.MAPS_SCAN_FAILED
+    }
+    val libraries = if (success) {
+        lines.mapNotNull { line ->
+            val match = MAPS_LIBRARY_PATTERN.matchEntire(line) ?: return@mapNotNull null
+            if (match.groupValues[1].toIntOrNull() != pid) return@mapNotNull null
+            val basename = match.groupValues[2]
+            val keywords = match.groupValues[3].split(',').filter { it in MAPS_KEYWORDS }.toSet()
+            if (basename.isBlank() || '/' in basename || keywords.isEmpty()) null
+            else WebViewKernelLibrary(basename, keywords)
+        }.distinctBy { it.basename.lowercase(Locale.ROOT) }
+    } else {
+        emptyList()
+    }
+    return ProcMapsScanResult(pid, state, libraries)
+}
+
+internal fun buildProcessAudit(
+    process: WeWorkProcess,
+    fdScan: ProcFdScanResult,
+    socketNamesByInode: Map<Long, String?>,
+    mapsScan: ProcMapsScanResult?
+): WeWorkProcessAudit = WeWorkProcessAudit(
+    process = process,
+    fdScanState = fdScan.state,
+    mapsScanState = mapsScan?.state ?: ProcMapsScanState.NOT_SCANNED,
+    sockets = fdScan.socketInodes.map { inode ->
+        OwnedUnixSocket(
+            inode = inode,
+            presentInProcUnix = socketNamesByInode.containsKey(inode),
+            socketName = socketNamesByInode[inode]
+        )
+    },
+    libraries = mapsScan?.libraries.orEmpty()
+)
 
 internal fun newlyAppearedProcesses(
     baseline: List<WeWorkProcessAudit>,
@@ -186,7 +287,6 @@ internal fun ownedSocketReferences(snapshot: LocalAdbScanSnapshot): List<OwnedSo
         audit.sockets.map { socket -> OwnedSocketReference(audit.process, socket) }
     }
 
-/** A socket is newly owned if this PID did not hold this inode in the baseline. */
 internal fun newlyOwnedSockets(
     baseline: LocalAdbScanSnapshot,
     current: LocalAdbScanSnapshot
@@ -228,19 +328,19 @@ internal fun classifySocketOwnership(
 
     val hasOwnedDebugSocket = ownedSocketReferences(snapshot).any { reference ->
         val name = reference.socket.socketName.orEmpty().lowercase(Locale.ROOT)
-        "devtools" in name && ("remote" in name || "xweb" in name || "webview" in name)
+        "devtools" in name && SOCKET_DEBUG_TOKENS.any { token -> name.contains(token) }
     }
     if (hasOwnedDebugSocket) return SocketOwnershipClassification.OWNED_DEVTOOLS_SOCKET_FOUND
-    if (snapshot.processes.any { it.fdScanState == ProcFdScanState.PERMISSION_DENIED }) {
+    if (snapshot.processes.any { it.fdScanState == ProcFdScanState.FD_SCAN_PERMISSION_DENIED }) {
         return SocketOwnershipClassification.PROC_FD_PERMISSION_DENIED
     }
-    if (baseline?.processes?.any { it.fdScanState == ProcFdScanState.PERMISSION_DENIED } == true) {
+    if (baseline?.processes?.any { it.fdScanState == ProcFdScanState.FD_SCAN_PERMISSION_DENIED } == true) {
         return SocketOwnershipClassification.PROC_FD_PERMISSION_DENIED
     }
-    if (snapshot.processes.any { it.fdScanState != ProcFdScanState.ENUMERATED }) {
+    if (snapshot.processes.any { it.fdScanState != ProcFdScanState.FD_SCAN_SUCCESS }) {
         return SocketOwnershipClassification.PROCESS_SCAN_INCOMPLETE
     }
-    if (baseline?.processes?.any { it.fdScanState != ProcFdScanState.ENUMERATED } == true) {
+    if (baseline?.processes?.any { it.fdScanState != ProcFdScanState.FD_SCAN_SUCCESS } == true) {
         return SocketOwnershipClassification.PROCESS_SCAN_INCOMPLETE
     }
     if (baseline?.procUnixReadFailed == true) return SocketOwnershipClassification.PROC_UNIX_READ_FAILED
@@ -249,19 +349,4 @@ internal fun classifySocketOwnership(
         return SocketOwnershipClassification.OWNED_UNIX_SOCKET_FOUND
     }
     return SocketOwnershipClassification.NO_OWNED_DEVTOOLS_SOCKET
-}
-
-private class MutableProcessAudit(val process: WeWorkProcess) {
-    var fdScanState: ProcFdScanState = ProcFdScanState.NOT_SCANNED
-    var mapsScanState: ProcMapsScanState = ProcMapsScanState.NOT_SCANNED
-    val sockets = linkedMapOf<Long, OwnedUnixSocket>()
-    val libraries = linkedMapOf<String, WebViewKernelLibrary>()
-
-    fun toImmutable() = WeWorkProcessAudit(
-        process = process,
-        fdScanState = fdScanState,
-        mapsScanState = mapsScanState,
-        sockets = sockets.values.toList(),
-        libraries = libraries.values.toList()
-    )
 }

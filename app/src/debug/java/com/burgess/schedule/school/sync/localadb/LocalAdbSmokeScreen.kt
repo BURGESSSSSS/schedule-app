@@ -31,8 +31,6 @@ import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.PAIRING_SUCC
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_FAILED
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_OPENED
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.SHELL_OPENING
-import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand.ID
-import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand.PROCESS_SOCKET_AUDIT
 import com.burgess.schedule.ui.components.AppCard
 import com.burgess.schedule.ui.components.PillButton
 import com.burgess.schedule.ui.components.PillStyle
@@ -65,14 +63,6 @@ internal enum class LocalAdbCheckState {
     ID_FAILED
 }
 
-internal enum class LocalAdbReadIssue {
-    NONE,
-    STREAM_CLOSED,
-    END_OF_STREAM,
-    TIMEOUT,
-    IO_ERROR
-}
-
 internal enum class WebViewSocketScanState {
     NOT_RUN,
     SCANNING_BASELINE,
@@ -82,6 +72,27 @@ internal enum class WebViewSocketScanState {
     PROC_UNIX_READ_FAILED,
     SCAN_FAILED
 }
+
+internal enum class CommandExecutorProbeState {
+    NOT_RUN,
+    RUNNING,
+    SUCCESS,
+    FAILED
+}
+
+internal data class CommandExecutorProbeResult(
+    val state: CommandExecutorProbeState = CommandExecutorProbeState.NOT_RUN,
+    val detail: String = ""
+)
+
+internal data class LocalAdbScanDiagnostics(
+    val procUnixState: ProcUnixScanState? = null,
+    val processQueryState: ProcessQueryScanState? = null,
+    val fdScanStates: Map<Int, ProcFdScanState> = emptyMap(),
+    val mapsScanStates: Map<Int, ProcMapsScanState> = emptyMap(),
+    val activeStep: String? = null,
+    val failure: String? = null
+)
 
 internal data class LocalAdbUidCheckResult(
     val idState: LocalAdbCheckState,
@@ -125,6 +136,9 @@ internal fun evaluateLocalAdbUidCheck(
             LocalAdbReadIssue.STREAM_CLOSED -> "IOException: Stream closed."
             LocalAdbReadIssue.END_OF_STREAM -> "EOF: Stream ended before a UID was received."
             LocalAdbReadIssue.TIMEOUT -> "Timeout: No UID output arrived within 5 seconds."
+            LocalAdbReadIssue.OUTPUT_LIMIT -> "Command output exceeded its safety limit."
+            LocalAdbReadIssue.COMMAND_FAILED -> "The id command returned a non-zero status."
+            LocalAdbReadIssue.PROTOCOL_ERROR -> "The command completion marker was incomplete."
             LocalAdbReadIssue.IO_ERROR -> "IOException: Failed to read id output."
             LocalAdbReadIssue.NONE -> "The id command returned no recognizable UID."
         }
@@ -172,7 +186,16 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var socketScanState by remember { mutableStateOf(WebViewSocketScanState.NOT_RUN) }
     var baselineScan by remember { mutableStateOf<LocalAdbScanSnapshot?>(null) }
     var currentScan by remember { mutableStateOf<LocalAdbScanSnapshot?>(null) }
+    var scanDiagnostics by remember { mutableStateOf(LocalAdbScanDiagnostics()) }
+    var commandProbe by remember { mutableStateOf(CommandExecutorProbeResult()) }
+    var commandProbeResults by remember { mutableStateOf<Map<LocalAdbCommandKind, CommandExecutorProbeResult>>(emptyMap()) }
+    var probePort by remember { mutableStateOf<Int?>(null) }
     var lastError by remember { mutableStateOf<String?>(null) }
+
+    fun recordCommandProbe(kind: LocalAdbCommandKind, result: CommandExecutorProbeResult) {
+        commandProbe = result
+        commandProbeResults = commandProbeResults + (kind to result)
+    }
 
     DisposableEffect(client) {
         onDispose {
@@ -211,6 +234,8 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         socketScanState = WebViewSocketScanState.NOT_RUN
         baselineScan = null
         currentScan = null
+        commandProbeResults = emptyMap()
+        probePort = null
         busy = true
         operationScope.launch {
             try {
@@ -241,6 +266,9 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             return
         }
 
+        if (probePort != port) commandProbeResults = emptyMap()
+        probePort = port
+
         lastError = null
         connectionState = ADB_CONNECTING
         shellState = NOT_RUN
@@ -260,10 +288,12 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
 
                 shellState = SHELL_OPENING
                 idState = ID_RUNNING
-                val readResult = client.executeReadOnly(ID)
+                val readResult = client.executeReadOnly(LocalAdbReadOnlyCommand.ID)
                 shellState = SHELL_OPENED
                 val result = evaluateLocalAdbUidCheck(
-                    readResult.output,
+                    readResult.output.takeIf {
+                        readResult.commandCompleted && readResult.issue == LocalAdbReadIssue.NONE
+                    }.orEmpty(),
                     readResult.issue,
                     readResult.failureSummary
                 )
@@ -272,6 +302,15 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 uidState = result.uidStatus
                 uidVerified = result.uidVerified
                 lastError = result.errorMessage
+                val idProbe = if (readResult.commandCompleted && readResult.issue == LocalAdbReadIssue.NONE) {
+                    CommandExecutorProbeResult(CommandExecutorProbeState.SUCCESS, "已收到结束标记")
+                } else {
+                    CommandExecutorProbeResult(
+                        CommandExecutorProbeState.FAILED,
+                        readResult.failureSummary ?: "id 未收到结束标记。"
+                    )
+                }
+                recordCommandProbe(LocalAdbCommandKind.ID, idProbe)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (exception: Exception) {
@@ -288,8 +327,67 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         }
     }
 
+    fun runExecutorProbe(command: LocalAdbReadOnlyCommand, summarize: (String) -> String?) {
+        if (busy) return
+        val port = connectPort.toIntOrNull()
+        if (port == null || port !in 1..65535) {
+            recordCommandProbe(command.kind, CommandExecutorProbeResult(CommandExecutorProbeState.FAILED, "请输入有效的 Wireless Debugging 连接端口。"))
+            return
+        }
+        if (probePort != port) commandProbeResults = emptyMap()
+        probePort = port
+        recordCommandProbe(command.kind, CommandExecutorProbeResult(CommandExecutorProbeState.RUNNING, "等待 ${command.kind.safeLabel} 的结束标记"))
+        lastError = null
+        busy = true
+        operationScope.launch {
+            try {
+                if (!client.connect(port)) throw IOException("TLS connection was not established")
+                val result = client.executeReadOnly(command)
+                if (result.issue != LocalAdbReadIssue.NONE || !result.commandCompleted) {
+                    recordCommandProbe(command.kind, CommandExecutorProbeResult(
+                        CommandExecutorProbeState.FAILED,
+                        result.failureSummary ?: "${command.kind.safeLabel} 未收到结束标记；部分输出：${result.partialOutputReceived}"
+                    ))
+                } else {
+                    val detail = summarize(result.output)
+                    if (result.exitCode != 0 || detail == null) {
+                        recordCommandProbe(command.kind, CommandExecutorProbeResult(
+                            CommandExecutorProbeState.FAILED,
+                            "${command.kind.safeLabel} 已收到结束标记，但命令或结果校验失败。"
+                        ))
+                    } else {
+                        recordCommandProbe(command.kind, CommandExecutorProbeResult(
+                            CommandExecutorProbeState.SUCCESS,
+                            "$detail · 已收到结束标记"
+                        ))
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                recordCommandProbe(command.kind, CommandExecutorProbeResult(CommandExecutorProbeState.FAILED, safeFailure(exception)))
+            } finally {
+                busy = false
+            }
+        }
+    }
+
     fun scanSockets(recordBaseline: Boolean) {
         if (busy) return
+        val requiredProbes = listOf(
+            LocalAdbCommandKind.ID,
+            LocalAdbCommandKind.PRINTF_TEST,
+            LocalAdbCommandKind.PROC_UNIX_READ,
+            LocalAdbCommandKind.MISSING_PROCESS_QUERY
+        )
+        val incompleteProbes = requiredProbes.filter {
+            commandProbeResults[it]?.state != CommandExecutorProbeState.SUCCESS
+        }
+        if (incompleteProbes.isNotEmpty()) {
+            lastError = "先完成命令结束协议检查：${incompleteProbes.joinToString { it.safeLabel }}。"
+            socketScanState = WebViewSocketScanState.SCAN_FAILED
+            return
+        }
         if (!uidVerified) {
             lastError = "请先运行 id 并验证 UID 2000，再扫描 sockets。"
             socketScanState = WebViewSocketScanState.SCAN_FAILED
@@ -317,6 +415,10 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             currentScan = null
             socketScanState = WebViewSocketScanState.SCANNING_CURRENT
         }
+        scanDiagnostics = LocalAdbScanDiagnostics(
+            procUnixState = ProcUnixScanState.PROC_UNIX_START,
+            activeStep = "ADB_CONNECT"
+        )
         connectionState = ADB_CONNECTING
         busy = true
         operationScope.launch {
@@ -324,28 +426,139 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 val connected = client.connect(port)
                 if (!connected) throw IOException("TLS connection was not established")
                 connectionState = ADB_CONNECTED
-
                 shellState = SHELL_OPENING
-                val scanOutput = client.executeReadOnly(PROCESS_SOCKET_AUDIT)
-                if (scanOutput.issue != LocalAdbReadIssue.NONE) {
-                    throw IOException(scanOutput.failureSummary ?: "Read-only socket scan did not complete.")
+                scanDiagnostics = scanDiagnostics.copy(activeStep = "PROC_UNIX_READ")
+
+                suspend fun executeStep(
+                    command: LocalAdbReadOnlyCommand,
+                    stepName: String,
+                    onFailure: (String) -> Unit
+                ): LocalAdbCommandOutput? {
+                    val result = try {
+                        client.executeReadOnly(command)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (exception: Exception) {
+                        val message = safeFailure(exception)
+                        onFailure(message)
+                        scanDiagnostics = scanDiagnostics.copy(activeStep = null, failure = "$stepName：$message")
+                        return null
+                    }
+                    val problem = when {
+                        result.issue != LocalAdbReadIssue.NONE -> result.failureSummary
+                            ?: "${command.kind.safeLabel} 未完成；部分输出：${result.partialOutputReceived}"
+                        !result.commandCompleted -> "${command.kind.safeLabel} 未收到结束标记；部分输出：${result.partialOutputReceived}"
+                        result.exitCode != 0 -> "${command.kind.safeLabel} 退出状态为 ${result.exitCode}"
+                        else -> null
+                    }
+                    if (problem != null) {
+                        onFailure(problem)
+                        scanDiagnostics = scanDiagnostics.copy(activeStep = null, failure = "$stepName：$problem")
+                        return null
+                    }
+                    return result
                 }
+
+                val unixOutput = executeStep(LocalAdbReadOnlyCommand.PROC_UNIX_READ, "PROC_UNIX_READ") { message ->
+                    scanDiagnostics = scanDiagnostics.copy(procUnixState = ProcUnixScanState.PROC_UNIX_FAILED)
+                    lastError = "PROC_UNIX_READ_FAILED：$message"
+                }
+                val unixResult = unixOutput?.let { parseProcUnixTable(it.output, it.exitCode) }
+                    ?: ProcUnixTableResult(ProcUnixScanState.PROC_UNIX_FAILED, null, emptyMap())
+                scanDiagnostics = scanDiagnostics.copy(
+                    procUnixState = unixResult.state,
+                    processQueryState = ProcessQueryScanState.PROCESS_QUERY_START,
+                    activeStep = "PROCESS_QUERY"
+                )
+
+                val processOutput = executeStep(LocalAdbReadOnlyCommand.PROCESS_QUERY, "PROCESS_QUERY") { message ->
+                    scanDiagnostics = scanDiagnostics.copy(processQueryState = ProcessQueryScanState.PROCESS_QUERY_FAILED)
+                    if (lastError == null) lastError = "PROCESS_QUERY_FAILED：$message"
+                }
+                val processResult = processOutput?.let { parseProcessQuery(it.output, it.exitCode) }
+                    ?: ProcessQueryResult(ProcessQueryScanState.PROCESS_QUERY_FAILED, emptyList())
+                scanDiagnostics = scanDiagnostics.copy(
+                    processQueryState = processResult.state,
+                    activeStep = null
+                )
                 shellState = SHELL_OPENED
-                val result = parseLocalAdbScanSnapshot(scanOutput.output)
+
+                val audits = mutableListOf<WeWorkProcessAudit>()
+                for (process in processResult.processes) {
+                    scanDiagnostics = scanDiagnostics.copy(
+                        fdScanStates = scanDiagnostics.fdScanStates + (process.pid to ProcFdScanState.FD_SCAN_START),
+                        activeStep = "FD_SCAN pid=${process.pid}"
+                    )
+                    var fdFailure: String? = null
+                    val fdOutput = executeStep(LocalAdbReadOnlyCommand.fdScan(process.pid), "FD_SCAN") { message ->
+                        fdFailure = message
+                        scanDiagnostics = scanDiagnostics.copy(
+                            fdScanStates = scanDiagnostics.fdScanStates + (process.pid to ProcFdScanState.FD_SCAN_FAILED)
+                        )
+                    }
+                    val fdResult = fdOutput?.let { parseProcFdScan(it.output, process.pid, it.exitCode) }
+                        ?: ProcFdScanResult(process.pid, ProcFdScanState.FD_SCAN_FAILED, emptyList())
+                    scanDiagnostics = scanDiagnostics.copy(
+                        fdScanStates = scanDiagnostics.fdScanStates + (process.pid to fdResult.state),
+                        activeStep = null,
+                        failure = when {
+                            fdFailure != null -> "FD_SCAN pid=${process.pid}：$fdFailure"
+                            fdResult.state == ProcFdScanState.FD_SCAN_FAILED -> "FD_SCAN pid=${process.pid}：未收到有效扫描结果标记"
+                            else -> scanDiagnostics.failure
+                        }
+                    )
+
+                    val shouldReadMaps = process.processName == "com.tencent.wework" ||
+                        process.processName == "com.tencent.wework:wxa_container0"
+                    var mapsResult: ProcMapsScanResult? = null
+                    if (shouldReadMaps) {
+                        scanDiagnostics = scanDiagnostics.copy(
+                            mapsScanStates = scanDiagnostics.mapsScanStates + (process.pid to ProcMapsScanState.MAPS_SCAN_START),
+                            activeStep = "MAPS_SCAN pid=${process.pid}"
+                        )
+                        var mapsFailure: String? = null
+                        val mapsOutput = executeStep(LocalAdbReadOnlyCommand.mapsScan(process.pid), "MAPS_SCAN") { message ->
+                            mapsFailure = message
+                            scanDiagnostics = scanDiagnostics.copy(
+                                mapsScanStates = scanDiagnostics.mapsScanStates + (process.pid to ProcMapsScanState.MAPS_SCAN_FAILED)
+                            )
+                        }
+                        val parsedMapsResult = mapsOutput?.let { parseProcMapsScan(it.output, process.pid, it.exitCode) }
+                            ?: ProcMapsScanResult(process.pid, ProcMapsScanState.MAPS_SCAN_FAILED, emptyList())
+                        mapsResult = parsedMapsResult
+                        scanDiagnostics = scanDiagnostics.copy(
+                            mapsScanStates = scanDiagnostics.mapsScanStates + (process.pid to parsedMapsResult.state),
+                            activeStep = null,
+                            failure = when {
+                                mapsFailure != null -> "MAPS_SCAN pid=${process.pid}：$mapsFailure"
+                                parsedMapsResult.state == ProcMapsScanState.MAPS_SCAN_FAILED -> "MAPS_SCAN pid=${process.pid}：未收到有效扫描结果标记"
+                                else -> scanDiagnostics.failure
+                            }
+                        )
+                    }
+                    audits += buildProcessAudit(process, fdResult, unixResult.socketNamesByInode, mapsResult)
+                }
+
+                val snapshot = LocalAdbScanSnapshot(
+                    stats = unixResult.stats,
+                    processes = audits,
+                    procUnixState = unixResult.state,
+                    processQueryState = processResult.state
+                )
                 if (recordBaseline) {
-                    baselineScan = result
+                    baselineScan = snapshot
                     currentScan = null
                 } else {
-                    currentScan = result
+                    currentScan = snapshot
                 }
-                if (result.procUnixReadFailed) {
+                if (snapshot.procUnixReadFailed) {
                     socketScanState = WebViewSocketScanState.PROC_UNIX_READ_FAILED
-                    lastError = "PROC_UNIX_READ_FAILED：无法读取 /proc/net/unix，暂不判断进程 socket 归属。"
+                    if (lastError == null) lastError = "PROC_UNIX_READ_FAILED：无法读取 /proc/net/unix，暂不判断进程 socket 归属。"
                     return@launch
                 }
-                if (result.processQueryFailed) {
+                if (snapshot.processQueryFailed) {
                     socketScanState = WebViewSocketScanState.SCAN_FAILED
-                    lastError = "企业微信进程查询失败；保留了本次 /proc/net/unix 统计供诊断。"
+                    if (lastError == null) lastError = "PROCESS_QUERY_FAILED：保留了本次 /proc/net/unix 统计供诊断。"
                     return@launch
                 }
 
@@ -354,13 +567,19 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 } else {
                     socketScanState = WebViewSocketScanState.COMPARISON_COMPLETE
                 }
+                if (scanDiagnostics.failure != null && lastError == null) {
+                    lastError = scanDiagnostics.failure
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (exception: Exception) {
                 if (connectionState == ADB_CONNECTING) connectionState = ADB_CONNECTION_FAILED
                 if (shellState == SHELL_OPENING) shellState = SHELL_FAILED
                 socketScanState = WebViewSocketScanState.SCAN_FAILED
-                lastError = safeFailure(exception)
+                val stage = scanDiagnostics.activeStep ?: "ADB_CONNECT"
+                val error = safeFailure(exception)
+                scanDiagnostics = scanDiagnostics.copy(activeStep = null, failure = "$stage：$error")
+                lastError = "$stage：$error"
             } finally {
                 busy = false
             }
@@ -432,6 +651,67 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
 
+        SectionLabel("命令结束协议回归检查")
+        AppCard(Modifier.fillMaxWidth()) {
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+                Text(
+                    "每条只读命令都通过独立随机结束标记确认完成。按顺序验证 id、printf、/proc/net/unix 行数和不存在的包查询；不会显示完整 proc 内容。",
+                    style = AppType.body,
+                    color = colors.ink
+                )
+                PillButton(
+                    if (busy && commandProbe.state == CommandExecutorProbeState.RUNNING) "命令验证中…" else "验证 printf test",
+                    onClick = {
+                        runExecutorProbe(LocalAdbReadOnlyCommand.PRINTF_TEST) { output ->
+                            if (output.trim() == "test") "printf test 输出正确" else null
+                        }
+                    },
+                    style = PillStyle.Secondary
+                )
+                PillButton(
+                    "验证 /proc/net/unix 读取",
+                    onClick = {
+                        runExecutorProbe(LocalAdbReadOnlyCommand.PROC_UNIX_READ) { output ->
+                            val result = parseProcUnixTable(output, exitCode = 0)
+                            result.stats?.let { "读取成功 · ${it.totalLines} 行" }
+                        }
+                    },
+                    style = PillStyle.Secondary
+                )
+                PillButton(
+                    "验证不存在的进程查询",
+                    onClick = {
+                        runExecutorProbe(LocalAdbReadOnlyCommand.MISSING_PROCESS_QUERY) { output ->
+                            val result = parseProcessQueryForPackage(
+                                output,
+                                exitCode = 0,
+                                packageName = "com.burgess.schedule.__localadb_absent_probe__"
+                            )
+                            if (result.state == ProcessQueryScanState.PROCESS_QUERY_SUCCESS && result.processes.isEmpty()) {
+                                "查询完成 · 匹配 0 个进程"
+                            } else {
+                                null
+                            }
+                        }
+                    },
+                    style = PillStyle.Secondary
+                )
+                Text("执行器状态：${commandProbe.state}", style = AppType.caption, color = colors.ink)
+                if (commandProbe.detail.isNotBlank()) {
+                    Text(commandProbe.detail, style = AppType.caption, color = if (commandProbe.state == CommandExecutorProbeState.FAILED) colors.danger else colors.mut)
+                }
+                listOf(
+                    LocalAdbCommandKind.ID,
+                    LocalAdbCommandKind.PRINTF_TEST,
+                    LocalAdbCommandKind.PROC_UNIX_READ,
+                    LocalAdbCommandKind.MISSING_PROCESS_QUERY
+                ).forEach { kind ->
+                    val status = commandProbeResults[kind]?.state?.name ?: "NOT_RUN"
+                    Text("${kind.safeLabel}：$status", style = AppType.caption, color = if (status == CommandExecutorProbeState.FAILED.name) colors.danger else colors.mut)
+                }
+            }
+        }
+
         SectionLabel("步骤 3 · 企业微信进程 Unix socket 只读归属")
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
@@ -451,6 +731,16 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     style = PillStyle.Secondary
                 )
                 Text("扫描状态：${socketScanState.name}", style = AppType.caption, color = colors.mut)
+                Text("PROC_UNIX：${scanDiagnostics.procUnixState?.name ?: "NOT_RUN"}", style = AppType.caption, color = colors.ink)
+                Text("PROCESS_QUERY：${scanDiagnostics.processQueryState?.name ?: "NOT_RUN"}", style = AppType.caption, color = colors.ink)
+                scanDiagnostics.fdScanStates.toSortedMap().forEach { (pid, state) ->
+                    Text("FD_SCAN pid=$pid：${state.name}", style = AppType.caption, color = if (state == ProcFdScanState.FD_SCAN_PERMISSION_DENIED || state == ProcFdScanState.FD_SCAN_FAILED) colors.danger else colors.ink)
+                }
+                scanDiagnostics.mapsScanStates.toSortedMap().forEach { (pid, state) ->
+                    Text("MAPS_SCAN pid=$pid：${state.name}", style = AppType.caption, color = if (state == ProcMapsScanState.MAPS_SCAN_PERMISSION_DENIED || state == ProcMapsScanState.MAPS_SCAN_FAILED) colors.danger else colors.ink)
+                }
+                scanDiagnostics.activeStep?.let { Text("当前步骤：$it", style = AppType.caption, color = colors.mut) }
+                scanDiagnostics.failure?.let { Text("步骤诊断：$it", style = AppType.caption, color = colors.danger) }
                 baselineScan?.let { snapshot ->
                     LocalAdbScanSnapshotCard("A 基线", snapshot)
                 }
@@ -510,7 +800,7 @@ private fun LocalAdbScanSnapshotCard(
                     process.processName
                 }
             )
-            Text("PID ${process.pid} · fd 状态：${audit.fdScanState}", style = AppType.caption, color = if (audit.fdScanState == ProcFdScanState.PERMISSION_DENIED) colors.danger else colors.ink)
+            Text("PID ${process.pid} · fd 状态：${audit.fdScanState}", style = AppType.caption, color = if (audit.fdScanState == ProcFdScanState.FD_SCAN_PERMISSION_DENIED || audit.fdScanState == ProcFdScanState.FD_SCAN_FAILED) colors.danger else colors.ink)
             Text("持有 Unix sockets：${audit.sockets.size}", style = AppType.caption, color = colors.ink)
             if (audit.sockets.isEmpty()) {
                 Text("没有发现 socket fd。", style = AppType.caption, color = colors.mut)
@@ -525,7 +815,7 @@ private fun LocalAdbScanSnapshotCard(
                 }
             }
 
-            Text("maps：${audit.mapsScanState}", style = AppType.caption, color = if (audit.mapsScanState == ProcMapsScanState.READ_FAILED) colors.mut else colors.ink)
+            Text("maps：${audit.mapsScanState}", style = AppType.caption, color = if (audit.mapsScanState == ProcMapsScanState.MAPS_SCAN_PERMISSION_DENIED || audit.mapsScanState == ProcMapsScanState.MAPS_SCAN_FAILED) colors.danger else colors.ink)
             if (audit.libraries.isNotEmpty()) {
                 audit.libraries.forEach { library ->
                     Text("${library.basename} · ${library.keywords.joinToString()}", style = AppType.caption, color = colors.ink)
@@ -535,7 +825,7 @@ private fun LocalAdbScanSnapshotCard(
                     style = AppType.caption,
                     color = colors.mut
                 )
-            } else if (audit.mapsScanState == ProcMapsScanState.READABLE) {
+            } else if (audit.mapsScanState == ProcMapsScanState.MAPS_SCAN_SUCCESS) {
                 Text("未筛选到指定内核库名。", style = AppType.caption, color = colors.mut)
             }
         }
