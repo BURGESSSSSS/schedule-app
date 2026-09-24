@@ -257,7 +257,7 @@ internal fun DevLogScreen(onBack: () -> Unit) {
 @Preview @Composable private fun DevLogLight() { 课程表Theme(false) { DevLogScreen({}) } }
 
 @Composable
-internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, onDeveloperClick: () -> Unit, onSchoolProbeClick: () -> Unit = {}) {
+internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, onDeveloperClick: () -> Unit, onLocalAdbSmokeClick: () -> Unit = {}) {
     Column(
         Modifier.fillMaxSize().padding(AppSpace.page),
         verticalArrangement = Arrangement.spacedBy(AppSpace.gap)
@@ -276,7 +276,7 @@ internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, 
         if (BuildConfig.DEBUG) {
             SectionLabel("开发调试")
             ListGroup {
-                ListRow("学校同步技术验证", "Shizuku 与 WebView 页面探测", onSchoolProbeClick)
+                ListRow("Local ADB 最小验证", "Wireless Debugging 配对与 shell id", onLocalAdbSmokeClick)
             }
         }
         Spacer(Modifier.weight(1f))

@@ -12,6 +12,9 @@ ksp = "2.2.10-2.0.2"
 room = "2.8.4"
 mlkitTextRecognition = "16.0.1"
 shizuku = "13.1.5"
+libadb = "3.1.1"
+sunSecurityAndroid = "1.1"
+conscryptAndroid = "2.5.3"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -34,6 +37,9 @@ androidx-room-compiler = { group = "androidx.room", name = "room-compiler", vers
 google-mlkit-text-recognition-chinese = { group = "com.google.mlkit", name = "text-recognition-chinese", version.ref = "mlkitTextRecognition" }
 shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
 shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
+libadb-android = { group = "com.github.MuntashirAkon", name = "libadb-android", version.ref = "libadb" }
+sun-security-android = { group = "com.github.MuntashirAkon", name = "sun-security-android", version.ref = "sunSecurityAndroid" }
+conscrypt-android = { group = "org.conscrypt", name = "conscrypt-android", version.ref = "conscryptAndroid" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
