@@ -263,6 +263,14 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         if (port == null || port !in 1..65535) {
             lastError = "请输入 Wireless Debugging 主页面显示的有效连接端口。"
             connectionState = ADB_CONNECTION_FAILED
+            idState = ID_FAILED
+            idOutput = ""
+            uidState = "UID_2000_NOT_VERIFIED（连接未开始）"
+            uidVerified = false
+            recordCommandProbe(
+                LocalAdbCommandKind.ID,
+                CommandExecutorProbeResult(CommandExecutorProbeState.FAILED, lastError.orEmpty())
+            )
             return
         }
 
@@ -276,6 +284,10 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         idOutput = ""
         uidState = "未验证"
         uidVerified = false
+        recordCommandProbe(
+            LocalAdbCommandKind.ID,
+            CommandExecutorProbeResult(CommandExecutorProbeState.RUNNING, "正在连接并运行 id")
+        )
         socketScanState = WebViewSocketScanState.NOT_RUN
         baselineScan = null
         currentScan = null
@@ -302,13 +314,19 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 uidState = result.uidStatus
                 uidVerified = result.uidVerified
                 lastError = result.errorMessage
-                val idProbe = if (readResult.commandCompleted && readResult.issue == LocalAdbReadIssue.NONE) {
-                    CommandExecutorProbeResult(CommandExecutorProbeState.SUCCESS, "已收到结束标记")
-                } else {
-                    CommandExecutorProbeResult(
-                        CommandExecutorProbeState.FAILED,
-                        readResult.failureSummary ?: "id 未收到结束标记。"
-                    )
+                val idProbe = when {
+                    readResult.issue != LocalAdbReadIssue.NONE || !readResult.commandCompleted ->
+                        CommandExecutorProbeResult(
+                            CommandExecutorProbeState.FAILED,
+                            readResult.failureSummary ?: "id 未收到结束标记。"
+                        )
+                    result.uidVerified ->
+                        CommandExecutorProbeResult(CommandExecutorProbeState.SUCCESS, "UID 2000 已验证")
+                    else ->
+                        CommandExecutorProbeResult(
+                            CommandExecutorProbeState.FAILED,
+                            "id 已完成，但 UID 校验失败：${result.uidStatus}"
+                        )
                 }
                 recordCommandProbe(LocalAdbCommandKind.ID, idProbe)
             } catch (cancelled: CancellationException) {
@@ -319,8 +337,15 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     ADB_CONNECTED -> if (shellState == SHELL_OPENING) shellState = SHELL_FAILED
                     else -> Unit
                 }
-                if (idState == ID_RUNNING) idState = ID_FAILED
+                idState = ID_FAILED
+                idOutput = ""
+                uidState = "UID_2000_NOT_VERIFIED（连接或执行失败）"
+                uidVerified = false
                 lastError = safeFailure(exception)
+                recordCommandProbe(
+                    LocalAdbCommandKind.ID,
+                    CommandExecutorProbeResult(CommandExecutorProbeState.FAILED, lastError.orEmpty())
+                )
             } finally {
                 busy = false
             }
@@ -343,22 +368,33 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             try {
                 if (!client.connect(port)) throw IOException("TLS connection was not established")
                 val result = client.executeReadOnly(command)
+                val printfAnalysis = if (command.kind == LocalAdbCommandKind.PRINTF_TEST) {
+                    analyzePrintfTestOutput(result.output, result.exitCode)
+                } else {
+                    null
+                }
+                val diagnostic = printfAnalysis?.diagnosticText()?.let { "\n$it" }.orEmpty()
                 if (result.issue != LocalAdbReadIssue.NONE || !result.commandCompleted) {
                     recordCommandProbe(command.kind, CommandExecutorProbeResult(
                         CommandExecutorProbeState.FAILED,
-                        result.failureSummary ?: "${command.kind.safeLabel} 未收到结束标记；部分输出：${result.partialOutputReceived}"
+                        (result.failureSummary ?: "${command.kind.safeLabel} 未收到结束标记；部分输出：${result.partialOutputReceived}") +
+                            diagnostic
                     ))
                 } else {
-                    val detail = summarize(result.output)
+                    val detail = if (printfAnalysis != null) {
+                        if (printfAnalysis.succeeded) "printf test 输出正确" else null
+                    } else {
+                        summarize(result.output)
+                    }
                     if (result.exitCode != 0 || detail == null) {
                         recordCommandProbe(command.kind, CommandExecutorProbeResult(
                             CommandExecutorProbeState.FAILED,
-                            "${command.kind.safeLabel} 已收到结束标记，但命令或结果校验失败。"
+                            "${command.kind.safeLabel} 已收到结束标记，但命令或结果校验失败。$diagnostic"
                         ))
                     } else {
                         recordCommandProbe(command.kind, CommandExecutorProbeResult(
                             CommandExecutorProbeState.SUCCESS,
-                            "$detail · 已收到结束标记"
+                            "$detail · 已收到结束标记$diagnostic"
                         ))
                     }
                 }
@@ -663,7 +699,11 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     if (busy && commandProbe.state == CommandExecutorProbeState.RUNNING) "命令验证中…" else "验证 printf test",
                     onClick = {
                         runExecutorProbe(LocalAdbReadOnlyCommand.PRINTF_TEST) { output ->
-                            if (output.trim() == "test") "printf test 输出正确" else null
+                            if (analyzePrintfTestOutput(output, exitCode = 0).normalizedOutput == "test") {
+                                "printf test 输出正确"
+                            } else {
+                                null
+                            }
                         }
                     },
                     style = PillStyle.Secondary
