@@ -21,8 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 
 internal enum class DevToolsCdpMethod(val protocolName: String) {
-    PAGE_GET_FRAME_TREE("Page.getFrameTree"),
-    PAGE_GET_NAVIGATION_HISTORY("Page.getNavigationHistory")
+    PAGE_GET_FRAME_TREE("Page.getFrameTree")
 }
 
 internal enum class DevToolsCdpFailure {
@@ -30,9 +29,15 @@ internal enum class DevToolsCdpFailure {
     UNSUPPORTED_WEBSOCKET_SCHEME,
     HANDSHAKE_INVALID,
     CDP_HANDSHAKE_ACCEPTED,
+    CDP_HANDSHAKE_HTTP_STATUS,
     CDP_REJECTED_ORIGIN,
     CDP_REJECTED_HOST,
     CDP_REJECTED_OTHER,
+    CDP_INVALID_ACCEPT,
+    CDP_UPGRADE_HEADER_INVALID,
+    CDP_HANDSHAKE_EOF,
+    CDP_HANDSHAKE_TIMEOUT,
+    CDP_HANDSHAKE_OTHER,
     TIMEOUT,
     STREAM_CLOSED,
     IO_ERROR,
@@ -40,7 +45,6 @@ internal enum class DevToolsCdpFailure {
     MESSAGE_TOO_LARGE,
     INVALID_JSON,
     PROTOCOL_ERROR,
-    RESPONSE_ID_MISMATCH,
     URL_MISSING
 }
 
@@ -72,30 +76,100 @@ internal data class DevToolsHandshakeDiagnostic(
     val responseBodySummary: String,
     val request: DevToolsHandshakeRequestDiagnostic,
     val classification: DevToolsCdpFailure
-)
+) {
+    val classificationLabel: String
+        get() = when (classification) {
+            DevToolsCdpFailure.CDP_HANDSHAKE_HTTP_STATUS ->
+                responseStatus?.let { "CDP_HANDSHAKE_HTTP_STATUS_$it" } ?: "CDP_HANDSHAKE_OTHER"
+            DevToolsCdpFailure.CDP_REJECTED_ORIGIN -> "CDP_REJECTED_ORIGIN"
+            DevToolsCdpFailure.CDP_REJECTED_HOST -> "CDP_REJECTED_HOST"
+            DevToolsCdpFailure.CDP_INVALID_ACCEPT -> "CDP_INVALID_ACCEPT"
+            DevToolsCdpFailure.CDP_UPGRADE_HEADER_INVALID -> "CDP_UPGRADE_HEADER_INVALID"
+            DevToolsCdpFailure.CDP_HANDSHAKE_EOF -> "CDP_HANDSHAKE_EOF"
+            DevToolsCdpFailure.CDP_HANDSHAKE_TIMEOUT -> "CDP_HANDSHAKE_TIMEOUT"
+            DevToolsCdpFailure.CDP_HANDSHAKE_OTHER -> "CDP_HANDSHAKE_OTHER"
+            else -> classification.name
+        }
+}
 
 internal sealed interface DevToolsCdpCommandResult {
     class Success(internal val result: JSONObject) : DevToolsCdpCommandResult {
         override fun toString(): String = "DevToolsCdpCommandResult.Success(result=<redacted>)"
     }
 
-    data class Failed(val failure: DevToolsCdpFailure, val protocolCode: Int? = null) :
+    data class Failed(
+        val failure: DevToolsCdpFailure,
+        val protocolCode: Int? = null,
+        val protocolMessage: String? = null
+    ) :
         DevToolsCdpCommandResult
 }
 
-internal sealed interface DevToolsCdpUrlResolution {
-    data class Resolved(
-        val url: SanitizedTargetUrl,
-        val source: TargetUrlSource,
-        val method: DevToolsCdpMethod
-    ) : DevToolsCdpUrlResolution
+internal sealed interface CdpResponseParseResult {
+    data object Ignore : CdpResponseParseResult
+    data class Success(val result: JSONObject) : CdpResponseParseResult
+    data class Error(val code: Int?, val message: String?) : CdpResponseParseResult
+    data object Invalid : CdpResponseParseResult
+}
 
-    data class Failed(val failure: DevToolsCdpFailure) : DevToolsCdpUrlResolution
+internal fun parseCdpResponseMessage(message: String, expectedId: Int): CdpResponseParseResult {
+    val json = try {
+        JSONObject(message)
+    } catch (_: JSONException) {
+        return CdpResponseParseResult.Invalid
+    } catch (_: RuntimeException) {
+        return CdpResponseParseResult.Invalid
+    }
+    val responseId = json.opt("id") as? Number ?: return CdpResponseParseResult.Ignore
+    if (responseId.toInt() != expectedId) return CdpResponseParseResult.Ignore
+    json.optJSONObject("error")?.let { error ->
+        return CdpResponseParseResult.Error(
+            error.optInt("code").takeIf { error.has("code") },
+            sanitizeCdpProtocolMessage(error.optString("message", ""))
+        )
+    }
+    val result = json.optJSONObject("result") ?: return CdpResponseParseResult.Invalid
+    return CdpResponseParseResult.Success(result)
 }
 
 internal interface DevToolsCdpCommandSession : Closeable {
     suspend fun sendCommand(method: DevToolsCdpMethod): DevToolsCdpCommandResult
 }
+
+internal sealed interface CdpFrameTreeProbeResult {
+    data class Success(val mainFrameUrl: SanitizedTargetUrl) : CdpFrameTreeProbeResult
+    data class CommandFailed(
+        val failure: DevToolsCdpFailure,
+        val protocolCode: Int? = null,
+        val protocolMessage: String? = null
+    ) : CdpFrameTreeProbeResult
+    data object MainFrameUrlMissing : CdpFrameTreeProbeResult
+}
+
+/** Phase 4 deliberately sends one command and never falls back to another CDP method. */
+internal suspend fun requestMainFrameUrl(session: DevToolsCdpCommandSession): CdpFrameTreeProbeResult =
+    when (val response = session.sendCommand(DevToolsCdpMethod.PAGE_GET_FRAME_TREE)) {
+        is DevToolsCdpCommandResult.Failed -> CdpFrameTreeProbeResult.CommandFailed(
+            response.failure,
+            response.protocolCode,
+            response.protocolMessage
+        )
+        is DevToolsCdpCommandResult.Success -> {
+            val url = extractFrameTreeUrl(response.result)
+                ?: return CdpFrameTreeProbeResult.MainFrameUrlMissing
+            CdpFrameTreeProbeResult.Success(url)
+        }
+    }
+
+internal fun compareHttpAndCdpTargetUrls(
+    httpTargetUrl: String,
+    cdpMainFrameUrl: SanitizedTargetUrl
+): String = if (httpTargetUrl == cdpMainFrameUrl.displayUrl) "MATCH" else "MISMATCH"
+
+internal fun isSchoolMainFrameUrl(url: SanitizedTargetUrl): Boolean =
+    url.scheme.equals("https", ignoreCase = true) &&
+        url.host.equals(SCHOOL_HOST, ignoreCase = true) &&
+        url.path == SCHOOL_PAGE_PATH
 
 internal class DevToolsCdpClient private constructor(
     private val stream: AdbStream,
@@ -119,7 +193,11 @@ internal class DevToolsCdpClient private constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (exception: CdpWireException) {
-                DevToolsCdpCommandResult.Failed(exception.failure, exception.protocolCode)
+                DevToolsCdpCommandResult.Failed(
+                    exception.failure,
+                    exception.protocolCode,
+                    exception.protocolMessage
+                )
             } catch (_: IOException) {
                 DevToolsCdpCommandResult.Failed(DevToolsCdpFailure.IO_ERROR)
             } catch (_: JSONException) {
@@ -130,56 +208,32 @@ internal class DevToolsCdpClient private constructor(
     private suspend fun awaitResponse(commandId: Int): DevToolsCdpCommandResult {
         while (true) {
             val message = readTextMessage()
-            val json = try {
-                JSONObject(message)
-            } catch (_: JSONException) {
-                throw CdpWireException(DevToolsCdpFailure.INVALID_JSON)
-            } catch (_: RuntimeException) {
-                throw CdpWireException(DevToolsCdpFailure.INVALID_JSON)
-            }
-
-            val responseId = json.opt("id") as? Number ?: continue
-            if (responseId.toInt() != commandId) continue
-            val error = json.optJSONObject("error")
-            if (error != null) {
-                throw CdpWireException(
+            when (val parsed = parseCdpResponseMessage(message, commandId)) {
+                CdpResponseParseResult.Ignore -> continue
+                CdpResponseParseResult.Invalid -> throw CdpWireException(DevToolsCdpFailure.INVALID_JSON)
+                is CdpResponseParseResult.Error -> throw CdpWireException(
                     failure = DevToolsCdpFailure.PROTOCOL_ERROR,
-                    protocolCode = error.optInt("code").takeIf { error.has("code") }
+                    protocolCode = parsed.code,
+                    protocolMessage = parsed.message
                 )
+                is CdpResponseParseResult.Success -> return DevToolsCdpCommandResult.Success(parsed.result)
             }
-            val result = json.optJSONObject("result")
-                ?: throw CdpWireException(DevToolsCdpFailure.INVALID_JSON)
-            return DevToolsCdpCommandResult.Success(result)
         }
     }
 
     private suspend fun readTextMessage(): String {
-        val fragments = ByteArrayOutputStream()
-        var collectingFragments = false
+        val assembler = CdpWebSocketMessageAssembler()
         while (true) {
             val frame = nextFrame()
-            when (frame.opcode) {
-                OPCODE_CLOSE -> throw CdpWireException(DevToolsCdpFailure.STREAM_CLOSED)
-                OPCODE_PING -> sendClientFrame(OPCODE_PONG, frame.payload)
-                OPCODE_PONG -> Unit
-                OPCODE_TEXT -> {
-                    if (!frame.fin) {
-                        fragments.reset()
-                        fragments.write(frame.payload)
-                        collectingFragments = true
-                    } else {
-                        return decodeMessage(frame.payload)
-                    }
+            when (val action = assembler.accept(frame)) {
+                CdpIncomingFrameAction.Continue,
+                CdpIncomingFrameAction.PongReceived -> Unit
+                is CdpIncomingFrameAction.PongRequired -> sendClientFrame(OPCODE_PONG, action.payload)
+                is CdpIncomingFrameAction.CloseReceived -> {
+                    runCatching { sendClientFrame(OPCODE_CLOSE, action.payload) }
+                    throw CdpWireException(DevToolsCdpFailure.STREAM_CLOSED)
                 }
-                OPCODE_CONTINUATION -> {
-                    if (!collectingFragments) throw CdpWireException(DevToolsCdpFailure.INVALID_FRAME)
-                    appendBounded(fragments, frame.payload)
-                    if (frame.fin) {
-                        collectingFragments = false
-                        return decodeMessage(fragments.toByteArray())
-                    }
-                }
-                else -> throw CdpWireException(DevToolsCdpFailure.INVALID_FRAME)
+                is CdpIncomingFrameAction.TextMessage -> return decodeMessage(action.payload)
             }
         }
     }
@@ -233,27 +287,7 @@ internal class DevToolsCdpClient private constructor(
             throw CdpWireException(DevToolsCdpFailure.MESSAGE_TOO_LARGE)
         }
         val mask = ByteArray(4).also(SecureRandom()::nextBytes)
-        val frame = ByteArrayOutputStream(payload.size + 14)
-        frame.write(0x80 or opcode)
-        when {
-            payload.size < 126 -> frame.write(0x80 or payload.size)
-            payload.size <= 0xFFFF -> {
-                frame.write(0x80 or 126)
-                frame.write((payload.size ushr 8) and 0xFF)
-                frame.write(payload.size and 0xFF)
-            }
-            else -> {
-                frame.write(0x80 or 127)
-                repeat(4) { frame.write(0) }
-                frame.write((payload.size ushr 24) and 0xFF)
-                frame.write((payload.size ushr 16) and 0xFF)
-                frame.write((payload.size ushr 8) and 0xFF)
-                frame.write(payload.size and 0xFF)
-            }
-        }
-        frame.write(mask)
-        payload.forEachIndexed { index, byte -> frame.write(byte.toInt() xor mask[index % 4].toInt()) }
-        output.write(frame.toByteArray())
+        output.write(buildClientWebSocketFrame(opcode, payload, mask))
         output.flush()
     }
 
@@ -265,13 +299,6 @@ internal class DevToolsCdpClient private constructor(
     override fun toString(): String = "DevToolsCdpClient(targetSocket=<redacted>)"
 
     internal companion object Connector {
-        private fun appendBounded(output: ByteArrayOutputStream, bytes: ByteArray) {
-            if (output.size() + bytes.size > MAX_CDP_MESSAGE_BYTES) {
-                throw CdpWireException(DevToolsCdpFailure.MESSAGE_TOO_LARGE)
-            }
-            output.write(bytes)
-        }
-
         suspend fun connect(
             stream: AdbStream,
             webSocketUrl: String,
@@ -283,18 +310,22 @@ internal class DevToolsCdpClient private constructor(
                 return@withContext closeAndFail(stream, DevToolsCdpFailure.UNSUPPORTED_WEBSOCKET_SCHEME)
             }
 
+            val requestDiagnostic = websocketHandshakeRequestDiagnostic(uri)
             try {
                 val input = stream.openInputStream()
                 val output = stream.openOutputStream()
                 val keyBytes = ByteArray(16).also(SecureRandom()::nextBytes)
                 val key = encodeBase64(keyBytes)
-                val requestDiagnostic = websocketHandshakeRequestDiagnostic(uri)
                 val request = buildWebSocketHandshakeRequest(uri, key)
                 output.write(request)
                 output.flush()
                 val handshake = withTimeoutOrNull(timeoutMs) {
                     readWebSocketHandshake(input, stream)
-                } ?: return@withContext closeAndFail(stream, DevToolsCdpFailure.TIMEOUT)
+                } ?: return@withContext closeAndFail(
+                    stream,
+                    DevToolsCdpFailure.CDP_HANDSHAKE_TIMEOUT,
+                    handshakeFailureDiagnostic(requestDiagnostic, DevToolsCdpFailure.CDP_HANDSHAKE_TIMEOUT)
+                )
                 val responseBytes = handshake.headerBytes + handshake.remainingBytes
                 when (val parsed = validateWebSocketHandshake(responseBytes, key, requestDiagnostic)) {
                     is HandshakeValidation.Accepted ->
@@ -314,9 +345,18 @@ internal class DevToolsCdpClient private constructor(
                 runCatching { stream.close() }
                 throw cancelled
             } catch (exception: CdpWireException) {
-                closeAndFail(stream, exception.failure)
+                val failure = if (exception.failure == DevToolsCdpFailure.STREAM_CLOSED) {
+                    DevToolsCdpFailure.CDP_HANDSHAKE_EOF
+                } else {
+                    DevToolsCdpFailure.CDP_HANDSHAKE_OTHER
+                }
+                closeAndFail(stream, failure, handshakeFailureDiagnostic(requestDiagnostic, failure))
             } catch (_: IOException) {
-                closeAndFail(stream, DevToolsCdpFailure.IO_ERROR)
+                closeAndFail(
+                    stream,
+                    DevToolsCdpFailure.CDP_HANDSHAKE_OTHER,
+                    handshakeFailureDiagnostic(requestDiagnostic, DevToolsCdpFailure.CDP_HANDSHAKE_OTHER)
+                )
             } catch (_: IllegalArgumentException) {
                 closeAndFail(stream, DevToolsCdpFailure.INVALID_WEBSOCKET_URL)
             }
@@ -333,13 +373,12 @@ internal class DevToolsCdpClient private constructor(
     }
 }
 
-internal fun buildCdpCommandPayload(commandId: Int, method: DevToolsCdpMethod): ByteArray =
-    JSONObject()
+internal fun buildCdpCommandPayload(commandId: Int, method: DevToolsCdpMethod): ByteArray {
+    val payload = JSONObject()
         .put("id", commandId)
         .put("method", method.protocolName)
-        .put("params", JSONObject())
-        .toString()
-        .toByteArray(StandardCharsets.UTF_8)
+    return payload.toString().toByteArray(StandardCharsets.UTF_8)
+}
 
 internal fun extractFrameTreeUrl(result: JSONObject): SanitizedTargetUrl? {
     val frame = result.optJSONObject("frameTree")
@@ -348,66 +387,17 @@ internal fun extractFrameTreeUrl(result: JSONObject): SanitizedTargetUrl? {
     return sanitizeDevToolsTargetUrl(frame.optString("url", ""))
 }
 
-internal fun extractCurrentNavigationHistoryUrl(result: JSONObject): SanitizedTargetUrl? {
-    val currentIndex = result.optInt("currentIndex", -1)
-    val entries = result.optJSONArray("entries") ?: return null
-    if (currentIndex !in 0 until entries.length()) return null
-    val currentEntry = entries.optJSONObject(currentIndex) ?: return null
-    return sanitizeDevToolsTargetUrl(currentEntry.optString("url", ""))
-}
-
-internal suspend fun resolveTargetUrlViaCdp(
-    session: DevToolsCdpCommandSession,
-    onState: (DevToolsDiscoveryState) -> Unit
-): DevToolsCdpUrlResolution {
-    val frameTreeResponse = session.sendCommand(DevToolsCdpMethod.PAGE_GET_FRAME_TREE)
-    if (frameTreeResponse is DevToolsCdpCommandResult.Success) {
-        val frameUrl = extractFrameTreeUrl(frameTreeResponse.result)
-        if (frameUrl != null) {
-            onState(DevToolsDiscoveryState.CDP_FRAME_TREE_SUCCESS)
-            onState(DevToolsDiscoveryState.TARGET_URL_RESOLVED)
-            return DevToolsCdpUrlResolution.Resolved(
-                frameUrl,
-                TargetUrlSource.CDP_PAGE_FRAME_TREE,
-                DevToolsCdpMethod.PAGE_GET_FRAME_TREE
-            )
-        }
-    }
-
-    val historyResponse = session.sendCommand(DevToolsCdpMethod.PAGE_GET_NAVIGATION_HISTORY)
-    if (historyResponse is DevToolsCdpCommandResult.Success) {
-        val historyUrl = extractCurrentNavigationHistoryUrl(historyResponse.result)
-        if (historyUrl != null) {
-            onState(DevToolsDiscoveryState.CDP_NAVIGATION_HISTORY_SUCCESS)
-            onState(DevToolsDiscoveryState.TARGET_URL_RESOLVED)
-            return DevToolsCdpUrlResolution.Resolved(
-                historyUrl,
-                TargetUrlSource.CDP_NAVIGATION_HISTORY,
-                DevToolsCdpMethod.PAGE_GET_NAVIGATION_HISTORY
-            )
-        }
-    }
-    val failure = when (val response = historyResponse) {
-        is DevToolsCdpCommandResult.Failed -> response.failure
-        is DevToolsCdpCommandResult.Success -> DevToolsCdpFailure.URL_MISSING
-    }
-    return DevToolsCdpUrlResolution.Failed(failure)
-}
-
 internal fun buildWebSocketHandshakeRequest(uri: URI, key: String): ByteArray {
     val path = uri.rawPath.orEmpty().ifBlank { "/" }
-    val requestTarget = path + uri.rawQuery?.let { "?$it" }.orEmpty()
-    require(requestTarget.none(Char::isISOControl))
-    val authority = safeWebSocketAuthority(uri)
-    require(authority.none(Char::isISOControl) && '@' !in authority)
+    require(path.startsWith('/') && path.none(Char::isISOControl) && '?' !in path && '#' !in path)
+    require(key.isNotBlank() && key.none(Char::isISOControl))
     return (
-        "GET $requestTarget HTTP/1.1\r\n" +
-            "Host: $authority\r\n" +
+        "GET $path HTTP/1.1\r\n" +
+            "Host: $DEVTOOLS_HOST_HEADER\r\n" +
             "Upgrade: websocket\r\n" +
             "Connection: Upgrade\r\n" +
             "Sec-WebSocket-Key: $key\r\n" +
-            "Sec-WebSocket-Version: 13\r\n" +
-            "Origin: http://localhost\r\n\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
         ).toByteArray(StandardCharsets.US_ASCII)
 }
 
@@ -418,12 +408,11 @@ internal fun websocketHandshakeRequestDiagnostic(uri: URI): DevToolsHandshakeReq
             "Upgrade",
             "Connection",
             "Sec-WebSocket-Key",
-            "Sec-WebSocket-Version",
-            "Origin"
+            "Sec-WebSocket-Version"
         ),
-        hostHeaderValue = safeWebSocketAuthority(uri),
-        originHeaderSent = true,
-        originHeaderValue = "http://localhost",
+        hostHeaderValue = DEVTOOLS_HOST_HEADER,
+        originHeaderSent = false,
+        originHeaderValue = null,
         upgradeHeaderValue = "websocket",
         connectionHeaderValue = "Upgrade",
         webSocketVersionHeaderValue = "13"
@@ -456,8 +445,7 @@ internal fun validateWebSocketHandshake(
     val bodyStart = (headerEnd).coerceAtMost(responseBytes.size)
     val bodyBytes = responseBytes.copyOfRange(bodyStart, responseBytes.size)
     val statusCode = HTTP_STATUS_PATTERN.find(statusLine)?.groupValues?.getOrNull(1)?.toIntOrNull()
-    val isSwitchingProtocols =
-        statusLine.startsWith("HTTP/1.1 101 ") || statusLine == "HTTP/1.1 101"
+    val isSwitchingProtocols = statusCode == 101
     if (!isSwitchingProtocols) {
         val rejection = classifyHandshakeRejection(statusCode, bodyBytes)
         return HandshakeValidation.Rejected(
@@ -466,17 +454,24 @@ internal fun validateWebSocketHandshake(
         )
     }
 
-    val expectedAccept = encodeBase64(
-        MessageDigest.getInstance("SHA-1")
-            .digest((key + WEBSOCKET_GUID).toByteArray(StandardCharsets.US_ASCII))
-    )
     val upgrade = headers["upgrade"].orEmpty()
     val connection = headers["connection"].orEmpty()
-    val valid =
-        upgrade.equals("websocket", ignoreCase = true) &&
-            connection.split(',').any { it.trim().equals("upgrade", ignoreCase = true) } &&
-            headers["sec-websocket-accept"] == expectedAccept
-    return if (valid) {
+    val upgradeValid = upgrade.equals("websocket", ignoreCase = true) &&
+        connection.split(',').any { it.trim().equals("upgrade", ignoreCase = true) }
+    if (!upgradeValid) {
+        return HandshakeValidation.Rejected(
+            DevToolsCdpFailure.CDP_UPGRADE_HEADER_INVALID,
+            diagnostic(
+                statusLine,
+                bodyBytes,
+                request,
+                DevToolsCdpFailure.CDP_UPGRADE_HEADER_INVALID
+            )
+        )
+    }
+
+    val expectedAccept = websocketAcceptValue(key)
+    return if (headers["sec-websocket-accept"] == expectedAccept) {
         HandshakeValidation.Accepted(
             diagnostic(
                 statusLine,
@@ -487,12 +482,12 @@ internal fun validateWebSocketHandshake(
         )
     } else {
         HandshakeValidation.Rejected(
-            DevToolsCdpFailure.HANDSHAKE_INVALID,
+            DevToolsCdpFailure.CDP_INVALID_ACCEPT,
             diagnostic(
                 statusLine,
                 bodyBytes,
                 request,
-                DevToolsCdpFailure.CDP_REJECTED_OTHER
+                DevToolsCdpFailure.CDP_INVALID_ACCEPT
             )
         )
     }
@@ -530,9 +525,20 @@ private fun classifyHandshakeRejection(statusCode: Int?, bodyBytes: ByteArray): 
             DevToolsCdpFailure.CDP_REJECTED_ORIGIN
         body.contains("host") && (rejectionWordPresent || statusCode == 403 || statusCode == 400) ->
             DevToolsCdpFailure.CDP_REJECTED_HOST
-        else -> DevToolsCdpFailure.CDP_REJECTED_OTHER
+        statusCode != null -> DevToolsCdpFailure.CDP_HANDSHAKE_HTTP_STATUS
+        else -> DevToolsCdpFailure.CDP_HANDSHAKE_OTHER
     }
 }
+
+private fun handshakeFailureDiagnostic(
+    request: DevToolsHandshakeRequestDiagnostic,
+    failure: DevToolsCdpFailure
+): DevToolsHandshakeDiagnostic = diagnostic(
+    statusLine = "",
+    bodyBytes = ByteArray(0),
+    request = request,
+    classification = failure
+)
 
 private fun summarizeResponseBody(bodyBytes: ByteArray): String {
     if (bodyBytes.isEmpty()) return "空正文"
@@ -554,10 +560,6 @@ private fun sanitizeResponseReason(value: String): String = RESPONSE_URL_PATTERN
     .substringBefore('#')
     .filterNot(Char::isISOControl)
     .take(MAX_RESPONSE_REASON_CHARS)
-
-private fun safeWebSocketAuthority(uri: URI): String =
-    uri.rawAuthority?.takeIf(String::isNotBlank)
-        ?: uri.host ?: throw IllegalArgumentException("Missing WebSocket authority")
 
 private fun emptyHandshakeRequestDiagnostic() = DevToolsHandshakeRequestDiagnostic(
     headerNames = emptyList(),
@@ -588,6 +590,24 @@ private fun encodeBase64(bytes: ByteArray): String {
     return output.toString()
 }
 
+internal fun websocketAcceptValue(key: String): String = encodeBase64(
+    MessageDigest.getInstance("SHA-1")
+        .digest((key + WEBSOCKET_GUID).toByteArray(StandardCharsets.US_ASCII))
+)
+
+private fun sanitizeCdpProtocolMessage(value: String): String {
+    val withoutUrls = RESPONSE_URL_PATTERN.replace(value) { match ->
+        TargetUrlNormalizer.normalize(match.value.trimEnd('.', ',', ')', ']')).url?.displayUrl ?: "<URL>"
+    }
+    val withoutCredentialValues = SENSITIVE_VALUE_PATTERN.replace(withoutUrls) { match ->
+        "${match.groupValues[1]}=[已隐藏]"
+    }
+    return withoutCredentialValues
+        .filterNot(Char::isISOControl)
+        .take(MAX_PROTOCOL_ERROR_MESSAGE_CHARS)
+        .ifBlank { "协议返回错误（消息已隐藏）" }
+}
+
 internal sealed interface HandshakeValidation {
     data class Accepted(val diagnostic: DevToolsHandshakeDiagnostic) : HandshakeValidation
     data class Rejected(
@@ -607,6 +627,88 @@ internal data class CdpWebSocketFrame(
     val opcode: Int,
     val payload: ByteArray
 )
+
+internal sealed interface CdpIncomingFrameAction {
+    data object Continue : CdpIncomingFrameAction
+    data object PongReceived : CdpIncomingFrameAction
+    data class PongRequired(val payload: ByteArray) : CdpIncomingFrameAction
+    data class CloseReceived(val payload: ByteArray) : CdpIncomingFrameAction
+    data class TextMessage(val payload: ByteArray) : CdpIncomingFrameAction
+}
+
+internal class CdpWebSocketMessageAssembler {
+    private val fragments = ByteArrayOutputStream()
+    private var collectingFragments = false
+
+    fun accept(frame: CdpWebSocketFrame): CdpIncomingFrameAction = when (frame.opcode) {
+        OPCODE_CLOSE -> CdpIncomingFrameAction.CloseReceived(frame.payload)
+        OPCODE_PING -> CdpIncomingFrameAction.PongRequired(frame.payload)
+        OPCODE_PONG -> CdpIncomingFrameAction.PongReceived
+        OPCODE_TEXT -> {
+            if (collectingFragments) throw CdpWireException(DevToolsCdpFailure.INVALID_FRAME)
+            if (frame.fin) {
+                CdpIncomingFrameAction.TextMessage(frame.payload)
+            } else {
+                fragments.reset()
+                appendBounded(fragments, frame.payload)
+                collectingFragments = true
+                CdpIncomingFrameAction.Continue
+            }
+        }
+        OPCODE_CONTINUATION -> {
+            if (!collectingFragments) throw CdpWireException(DevToolsCdpFailure.INVALID_FRAME)
+            appendBounded(fragments, frame.payload)
+            if (frame.fin) {
+                collectingFragments = false
+                CdpIncomingFrameAction.TextMessage(fragments.toByteArray())
+            } else {
+                CdpIncomingFrameAction.Continue
+            }
+        }
+        else -> throw CdpWireException(DevToolsCdpFailure.INVALID_FRAME)
+    }
+
+    private fun appendBounded(output: ByteArrayOutputStream, bytes: ByteArray) {
+        if (output.size() + bytes.size > MAX_CDP_MESSAGE_BYTES) {
+            throw CdpWireException(DevToolsCdpFailure.MESSAGE_TOO_LARGE)
+        }
+        output.write(bytes)
+    }
+}
+
+internal fun buildClientWebSocketFrame(
+    opcode: Int,
+    payload: ByteArray,
+    maskingKey: ByteArray
+): ByteArray {
+    require(maskingKey.size == 4)
+    require(opcode in setOf(OPCODE_CONTINUATION, OPCODE_TEXT, OPCODE_CLOSE, OPCODE_PING, OPCODE_PONG))
+    require(opcode < OPCODE_CLOSE || payload.size <= 125)
+    require(payload.size <= MAX_CDP_MESSAGE_BYTES)
+    val frame = ByteArrayOutputStream(payload.size + 14)
+    frame.write(0x80 or opcode)
+    when {
+        payload.size < 126 -> frame.write(0x80 or payload.size)
+        payload.size <= 0xFFFF -> {
+            frame.write(0x80 or 126)
+            frame.write((payload.size ushr 8) and 0xFF)
+            frame.write(payload.size and 0xFF)
+        }
+        else -> {
+            frame.write(0x80 or 127)
+            repeat(4) { frame.write(0) }
+            frame.write((payload.size ushr 24) and 0xFF)
+            frame.write((payload.size ushr 16) and 0xFF)
+            frame.write((payload.size ushr 8) and 0xFF)
+            frame.write(payload.size and 0xFF)
+        }
+    }
+    frame.write(maskingKey)
+    payload.forEachIndexed { index, byte ->
+        frame.write((byte.toInt() xor (maskingKey[index % 4].toInt() and 0xFF)) and 0xFF)
+    }
+    return frame.toByteArray()
+}
 
 internal fun parseCdpWebSocketFrame(
     bytes: ByteArray,
@@ -669,35 +771,18 @@ internal fun parseCdpWebSocketFrame(
 
 internal fun frameTreeUrlFromMessage(result: JSONObject): SanitizedTargetUrl? = extractFrameTreeUrl(result)
 
-internal fun navigationHistoryUrlFromMessage(result: JSONObject): SanitizedTargetUrl? =
-    extractCurrentNavigationHistoryUrl(result)
-
 private suspend fun readWebSocketHandshake(
     input: InputStream,
     stream: AdbStream
 ): WebSocketHandshakeBytes {
-    val accumulated = ByteArrayOutputStream()
+    val accumulator = WebSocketHandshakeAccumulator()
     val chunk = ByteArray(CDP_READ_CHUNK_BYTES)
     while (true) {
         val available = input.available()
         if (available > 0) {
             val count = input.read(chunk, 0, minOf(available, chunk.size))
             if (count < 0) throw CdpWireException(DevToolsCdpFailure.STREAM_CLOSED)
-            accumulated.write(chunk, 0, count)
-            val bytes = accumulated.toByteArray()
-            val headerEnd = findHandshakeHeaderEnd(bytes)
-            if (headerEnd != null) {
-                if (headerEnd > MAX_WEBSOCKET_HEADER_BYTES) {
-                    throw CdpWireException(DevToolsCdpFailure.MESSAGE_TOO_LARGE)
-                }
-                return WebSocketHandshakeBytes(
-                    headerBytes = bytes.copyOfRange(0, headerEnd),
-                    remainingBytes = bytes.copyOfRange(headerEnd, bytes.size)
-                )
-            }
-            if (bytes.size > MAX_WEBSOCKET_HEADER_BYTES) {
-                throw CdpWireException(DevToolsCdpFailure.MESSAGE_TOO_LARGE)
-            }
+            accumulator.append(chunk, length = count)?.let { return it }
         } else if (stream.isClosed) {
             throw CdpWireException(DevToolsCdpFailure.STREAM_CLOSED)
         } else {
@@ -743,14 +828,38 @@ private class CdpByteQueue {
     }
 }
 
-private data class WebSocketHandshakeBytes(
+internal data class WebSocketHandshakeBytes(
     val headerBytes: ByteArray,
     val remainingBytes: ByteArray
 )
 
+internal class WebSocketHandshakeAccumulator {
+    private val accumulated = ByteArrayOutputStream()
+
+    fun append(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size): WebSocketHandshakeBytes? {
+        if (length > 0) accumulated.write(bytes, offset, length)
+        val all = accumulated.toByteArray()
+        val headerEnd = findHandshakeHeaderEnd(all)
+        if (headerEnd == null) {
+            if (all.size > MAX_WEBSOCKET_HEADER_BYTES) {
+                throw CdpWireException(DevToolsCdpFailure.MESSAGE_TOO_LARGE)
+            }
+            return null
+        }
+        if (headerEnd > MAX_WEBSOCKET_HEADER_BYTES) {
+            throw CdpWireException(DevToolsCdpFailure.MESSAGE_TOO_LARGE)
+        }
+        return WebSocketHandshakeBytes(
+            headerBytes = all.copyOfRange(0, headerEnd),
+            remainingBytes = all.copyOfRange(headerEnd, all.size)
+        )
+    }
+}
+
 private class CdpWireException(
     val failure: DevToolsCdpFailure,
-    val protocolCode: Int? = null
+    val protocolCode: Int? = null,
+    val protocolMessage: String? = null
 ) : IOException()
 
 private const val WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -767,6 +876,11 @@ private const val CDP_CONNECT_TIMEOUT_MS = 5_000L
 private const val CDP_COMMAND_TIMEOUT_MS = 5_000L
 private const val MAX_HANDSHAKE_BODY_SUMMARY_BYTES = 1_024
 private const val MAX_RESPONSE_REASON_CHARS = 120
+private const val MAX_PROTOCOL_ERROR_MESSAGE_CHARS = 160
+private const val DEVTOOLS_HOST_HEADER = "localhost"
 private val HTTP_STATUS_PATTERN = Regex("^HTTP/\\d(?:\\.\\d)?\\s+(\\d{3})(?:\\s+([^\\r\\n]*))?")
 private val RESPONSE_URL_PATTERN = Regex("(?i)\\b(?:https?|wss?)://[^\\s\"'<>]+")
+private val SENSITIVE_VALUE_PATTERN = Regex(
+    "(?i)\\b(cookie|set-cookie|authorization|token|session|jsessionid|oauth[_ -]?(?:code|state))\\b[^\\r\\n]*"
+)
 private const val CDP_POLL_INTERVAL_MS = 20L

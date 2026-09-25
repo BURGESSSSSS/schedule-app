@@ -31,7 +31,9 @@ internal data class DevToolsTargetDiscoveryResult(
     val targets: List<DevToolsTarget>,
     val endpointUsed: DevToolsEndpoint?,
     val cdpFailure: DevToolsCdpFailure? = null,
-    val cdpHandshakeDiagnostic: DevToolsHandshakeDiagnostic? = null
+    val cdpHandshakeDiagnostic: DevToolsHandshakeDiagnostic? = null,
+    /** Retained only in memory so Phase 4 can connect to the already-confirmed school target. */
+    val schoolCdpEndpoint: DevToolsCdpEndpoint? = null
 )
 
 internal fun findDevToolsSocketCandidates(sockets: List<NamedUnixSocket>): List<DevToolsSocketCandidate> =
@@ -136,7 +138,8 @@ internal suspend fun discoverDevToolsTargets(
                 attempts,
                 targets,
                 endpointUsed,
-                cdpFailure
+                cdpFailure,
+                schoolCdpEndpoint = pageCandidate.cdpEndpoint
             )
         }
 
@@ -189,7 +192,8 @@ internal suspend fun discoverDevToolsTargets(
                     attempts,
                     targets,
                     endpointUsed,
-                    cdpFailure
+                    cdpFailure,
+                    schoolCdpEndpoint = mergedCandidate.cdpEndpoint
                 )
             }
             continue
@@ -341,7 +345,8 @@ private fun result(
     targets: List<DevToolsTarget>,
     endpointUsed: DevToolsEndpoint?,
     cdpFailure: DevToolsCdpFailure?,
-    cdpHandshakeDiagnostic: DevToolsHandshakeDiagnostic? = null
+    cdpHandshakeDiagnostic: DevToolsHandshakeDiagnostic? = null,
+    schoolCdpEndpoint: DevToolsCdpEndpoint? = null
 ): DevToolsTargetDiscoveryResult = DevToolsTargetDiscoveryResult(
     finalState = state,
     candidates = candidates,
@@ -349,7 +354,8 @@ private fun result(
     targets = targets.distinctBy { Triple(it.socketName, it.id, it.displayUrl) },
     endpointUsed = endpointUsed,
     cdpFailure = cdpFailure,
-    cdpHandshakeDiagnostic = cdpHandshakeDiagnostic
+    cdpHandshakeDiagnostic = cdpHandshakeDiagnostic,
+    schoolCdpEndpoint = schoolCdpEndpoint
 )
 
 private suspend fun requestFromSocket(

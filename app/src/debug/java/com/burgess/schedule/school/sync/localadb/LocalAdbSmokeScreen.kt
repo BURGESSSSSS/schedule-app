@@ -39,6 +39,7 @@ import com.burgess.schedule.ui.components.SubPageScaffold
 import com.burgess.schedule.ui.theme.AppSpace
 import com.burgess.schedule.ui.theme.AppType
 import com.burgess.schedule.ui.theme.LocalAppColors
+import io.github.muntashirakon.adb.AdbStream
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -187,12 +188,31 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var devToolsResult by remember { mutableStateOf<DevToolsTargetDiscoveryResult?>(null) }
     var devToolsMessage by remember { mutableStateOf<String?>(null) }
     var devToolsProcessQueryStatus by remember { mutableStateOf("未查询") }
+    var cdpWebSocketState by remember { mutableStateOf("NOT_RUN") }
+    var cdpCommandState by remember { mutableStateOf("NOT_RUN") }
+    var cdpHandshakeDiagnostic by remember { mutableStateOf<DevToolsHandshakeDiagnostic?>(null) }
+    var cdpHttpTargetUrl by remember { mutableStateOf<String?>(null) }
+    var cdpMainFrameUrl by remember { mutableStateOf<SanitizedTargetUrl?>(null) }
+    var cdpUrlComparison by remember { mutableStateOf<String?>(null) }
+    var cdpFailureMessage by remember { mutableStateOf<String?>(null) }
+    var cdpFinalState by remember { mutableStateOf<String?>(null) }
     var probePort by remember { mutableStateOf<Int?>(null) }
     var lastError by remember { mutableStateOf<String?>(null) }
 
     fun recordCommandProbe(kind: LocalAdbCommandKind, result: CommandExecutorProbeResult) {
         commandProbe = result
         commandProbeResults = commandProbeResults + (kind to result)
+    }
+
+    fun clearCdpPhase4Result() {
+        cdpWebSocketState = "NOT_RUN"
+        cdpCommandState = "NOT_RUN"
+        cdpHandshakeDiagnostic = null
+        cdpHttpTargetUrl = null
+        cdpMainFrameUrl = null
+        cdpUrlComparison = null
+        cdpFailureMessage = null
+        cdpFinalState = null
     }
 
     DisposableEffect(client) {
@@ -242,6 +262,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         devToolsResult = null
         devToolsMessage = null
         devToolsProcessQueryStatus = "未查询"
+        clearCdpPhase4Result()
         probePort = null
         busy = true
         operationScope.launch {
@@ -307,6 +328,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         devToolsResult = null
         devToolsMessage = null
         devToolsProcessQueryStatus = "未查询"
+        clearCdpPhase4Result()
         busy = true
         operationScope.launch {
             try {
@@ -384,6 +406,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         devToolsResult = null
         devToolsMessage = null
         devToolsProcessQueryStatus = "未查询"
+        clearCdpPhase4Result()
         busy = true
         operationScope.launch {
             fun recordState(state: DevToolsDiscoveryState) {
@@ -458,6 +481,113 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 if (shellState == SHELL_OPENING) shellState = SHELL_FAILED
                 devToolsMessage = "${exception.javaClass.simpleName.ifBlank { "Exception" }}：Target discovery 未完成。"
             } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun verifyCdpMinimalConnection() {
+        if (busy) return
+        val port = connectPort.toIntOrNull()
+        if (port == null || port !in 1..65535) {
+            cdpFailureMessage = "请输入 Wireless Debugging 主页面显示的有效连接端口。"
+            cdpWebSocketState = "FAILED"
+            return
+        }
+        if (!uidVerified || idState != ID_EXECUTED || probePort != port) {
+            cdpFailureMessage = "请先使用当前连接端口运行 id，并确认 UID 2000。"
+            cdpWebSocketState = "FAILED"
+            return
+        }
+
+        val discovery = devToolsResult
+        val endpoint = discovery?.schoolCdpEndpoint
+        val target = endpoint?.let { selected ->
+            discovery.targets.firstOrNull {
+                it.id == selected.targetId &&
+                    it.socketName == selected.socketName &&
+                    it.title == SCHOOL_TITLE &&
+                    it.type.equals("page", ignoreCase = true) &&
+                    it.containerName == WEWORK_PACKAGE &&
+                    it.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND
+            }
+        }
+        if (discovery?.finalState != DevToolsDiscoveryState.SCHOOL_TARGET_FOUND || endpoint == null || target == null) {
+            cdpFailureMessage = "请先运行 Phase 3 并确认 SCHOOL_TARGET_FOUND；本按钮只连接该学校 Target。"
+            cdpWebSocketState = "FAILED"
+            return
+        }
+
+        clearCdpPhase4Result()
+        cdpHttpTargetUrl = target.displayUrl
+        cdpWebSocketState = "CONNECTING"
+        cdpCommandState = "CDP_CONNECT_START"
+        busy = true
+        operationScope.launch {
+            var openedStream: AdbStream? = null
+            var cdpClient: DevToolsCdpClient? = null
+            try {
+                connectionState = ADB_CONNECTING
+                if (!client.connect(port)) throw IOException("TLS connection was not established")
+                connectionState = ADB_CONNECTED
+                cdpCommandState = "CDP_CONNECT_START"
+                openedStream = client.openDevToolsSocket(endpoint.socketName)
+
+                when (val connected = DevToolsCdpClient.connect(openedStream, endpoint.rawWebSocketUrl)) {
+                    is DevToolsCdpConnectResult.Failed -> {
+                        cdpWebSocketState = "FAILED"
+                        cdpCommandState = connected.failure.name
+                        cdpHandshakeDiagnostic = connected.handshakeDiagnostic
+                        cdpFailureMessage = connected.handshakeDiagnostic?.classificationLabel
+                            ?: connected.failure.name
+                    }
+                    is DevToolsCdpConnectResult.Connected -> {
+                        cdpClient = connected.client
+                        cdpHandshakeDiagnostic = connected.handshakeDiagnostic
+                        cdpWebSocketState = "CONNECTED"
+                        cdpCommandState = "CDP_CONNECTED"
+                        cdpCommandState = "GET_FRAME_TREE_START"
+                        when (val frameTree = requestMainFrameUrl(connected.client)) {
+                            is CdpFrameTreeProbeResult.Success -> {
+                                cdpCommandState = "GET_FRAME_TREE_SUCCESS"
+                                cdpMainFrameUrl = frameTree.mainFrameUrl
+                                cdpUrlComparison = compareHttpAndCdpTargetUrls(
+                                    target.displayUrl,
+                                    frameTree.mainFrameUrl
+                                )
+                                if (cdpUrlComparison == "MISMATCH") {
+                                    cdpFinalState = "【需要总控判断】HTTP 与 CDP URL 不一致，已停止。"
+                                } else if (isSchoolMainFrameUrl(frameTree.mainFrameUrl)) {
+                                    cdpCommandState = "SCHOOL_FRAME_CONFIRMED"
+                                    cdpFinalState = "PHASE4_CDP_MINIMAL_SUCCESS"
+                                } else {
+                                    cdpFinalState = "主 frame URL 未匹配学校课表页面，已停止。"
+                                }
+                            }
+                            is CdpFrameTreeProbeResult.CommandFailed -> {
+                                cdpCommandState = "CDP_COMMAND_ERROR"
+                                cdpFailureMessage = buildString {
+                                    append(frameTree.failure.name)
+                                    frameTree.protocolCode?.let { append(" · code=$it") }
+                                    frameTree.protocolMessage?.let { append(" · ").append(it) }
+                                }
+                            }
+                            CdpFrameTreeProbeResult.MainFrameUrlMissing -> {
+                                cdpCommandState = "GET_FRAME_TREE_SUCCESS"
+                                cdpFailureMessage = "主 frame URL 缺失；未发送其他 CDP 命令。"
+                            }
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                cdpWebSocketState = "FAILED"
+                cdpCommandState = "CDP_CONNECT_FAILED"
+                cdpFailureMessage = exception.javaClass.simpleName.ifBlank { "Exception" }
+            } finally {
+                runCatching { cdpClient?.close() }
+                if (cdpClient == null) runCatching { openedStream?.close() }
                 busy = false
             }
         }
@@ -836,13 +966,9 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     result.cdpHandshakeDiagnostic?.let { diagnostic ->
                         SectionLabel("WebSocket 握手诊断")
                         Text(
-                            "分类=${diagnostic.classification.name} · HTTP=${diagnostic.responseStatus ?: "无响应"} · reason=${diagnostic.responseReason ?: "无"}",
+                            "分类=${diagnostic.classificationLabel} · HTTP=${diagnostic.responseStatus ?: "无响应"} · reason=${diagnostic.responseReason ?: "无"}",
                             style = AppType.caption,
-                            color = if (diagnostic.classification in setOf(
-                                    DevToolsCdpFailure.CDP_REJECTED_ORIGIN,
-                                    DevToolsCdpFailure.CDP_REJECTED_HOST,
-                                    DevToolsCdpFailure.CDP_REJECTED_OTHER
-                                )) colors.danger else colors.ink
+                            color = if (diagnostic.classification != DevToolsCdpFailure.CDP_HANDSHAKE_ACCEPTED) colors.danger else colors.ink
                         )
                         Text("响应正文摘要：${diagnostic.responseBodySummary}", style = AppType.caption, color = colors.mut)
                         Text("发送 Header 名称：${diagnostic.request.headerNames.joinToString().ifBlank { "无" }}", style = AppType.caption, color = colors.mut)
@@ -922,6 +1048,76 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                             Text("仅显示前 $MAX_TARGETS_TO_DISPLAY 个 Target。", style = AppType.caption, color = colors.mut)
                         }
                     }
+                }
+            }
+        }
+
+        SectionLabel("Phase 4 · XWeb DevTools 最小 CDP 会话")
+        AppCard(Modifier.fillMaxWidth()) {
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+                Text(
+                    "只连接 Phase 3 已确认的“我的课表” Target，完成 WebSocket 握手后仅发送一次 Page.getFrameTree，再立即关闭 stream。不会读取 DOM、页面正文、Cookie、Storage 或学校接口。",
+                    style = AppType.body,
+                    color = colors.ink
+                )
+                val phase4Endpoint = devToolsResult?.schoolCdpEndpoint
+                val phase4Target = phase4Endpoint?.let { endpoint ->
+                    devToolsResult?.targets?.firstOrNull {
+                        it.id == endpoint.targetId &&
+                            it.socketName == endpoint.socketName &&
+                            it.title == SCHOOL_TITLE &&
+                            it.type.equals("page", ignoreCase = true) &&
+                            it.containerName == WEWORK_PACKAGE &&
+                            it.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND
+                    }
+                }
+                if (phase4Target != null && devToolsResult?.finalState == DevToolsDiscoveryState.SCHOOL_TARGET_FOUND) {
+                    Text("Target：${phase4Target.title} · ${phase4Target.type} · ${phase4Target.containerName}", style = AppType.caption, color = colors.ink)
+                    Text("Socket：${phase4Target.socketName} · target id：${phase4Target.id}", style = AppType.caption, color = colors.mut)
+                    PillButton(
+                        if (busy && cdpWebSocketState == "CONNECTING") "CDP 连接中…" else "验证 CDP 最小连接",
+                        onClick = ::verifyCdpMinimalConnection,
+                        style = PillStyle.Primary
+                    )
+                } else {
+                    Text(
+                        if (devToolsResult?.finalState == DevToolsDiscoveryState.SCHOOL_TARGET_FOUND) {
+                            "学校 Target 已确认，但其 WebSocket 地址不可用；本轮无法建立 CDP 会话。"
+                        } else {
+                            "先完成 Phase 3 并得到 SCHOOL_TARGET_FOUND；学校 Target 确认前不会显示连接按钮。"
+                        },
+                        style = AppType.caption,
+                        color = colors.mut
+                    )
+                }
+
+                if (cdpWebSocketState != "NOT_RUN") {
+                    Text("WebSocket：$cdpWebSocketState", style = AppType.caption, color = if (cdpWebSocketState == "FAILED") colors.danger else colors.ink)
+                    Text("CDP：$cdpCommandState", style = AppType.caption, color = colors.ink)
+                    cdpHandshakeDiagnostic?.let { diagnostic ->
+                        Text(
+                            "Handshake：${diagnostic.classificationLabel} · HTTP=${diagnostic.responseStatus ?: "无响应"} · reason=${diagnostic.responseReason ?: "无"}",
+                            style = AppType.caption,
+                            color = if (diagnostic.classification != DevToolsCdpFailure.CDP_HANDSHAKE_ACCEPTED) colors.danger else colors.ink
+                        )
+                        Text("响应正文摘要：${diagnostic.responseBodySummary}", style = AppType.caption, color = colors.mut)
+                        Text("发送 Header：${diagnostic.request.headerNames.joinToString()}", style = AppType.caption, color = colors.mut)
+                        Text(
+                            "Host=${diagnostic.request.hostHeaderValue ?: "无"} · Origin=${if (diagnostic.request.originHeaderSent) diagnostic.request.originHeaderValue ?: "值未知" else "未发送"}",
+                            style = AppType.caption,
+                            color = colors.mut
+                        )
+                        Text(
+                            "Upgrade=${diagnostic.request.upgradeHeaderValue ?: "无"} · Connection=${diagnostic.request.connectionHeaderValue ?: "无"} · Sec-WebSocket-Version=${diagnostic.request.webSocketVersionHeaderValue ?: "无"}",
+                            style = AppType.caption,
+                            color = colors.mut
+                        )
+                    }
+                    cdpHttpTargetUrl?.let { Text("HTTP Target URL：$it", style = AppType.caption, color = colors.mut) }
+                    cdpMainFrameUrl?.let { Text("CDP main frame：${it.displayUrl}", style = AppType.caption, color = colors.ink) }
+                    cdpUrlComparison?.let { Text("HTTP / CDP：$it", style = AppType.caption, color = if (it == "MATCH") colors.ink else colors.danger) }
+                    cdpFailureMessage?.let { Text("诊断：$it", style = AppType.caption, color = colors.danger) }
+                    cdpFinalState?.let { Text(it, style = AppType.body, color = if (it == "PHASE4_CDP_MINIMAL_SUCCESS") colors.ink else colors.danger) }
                 }
             }
         }
