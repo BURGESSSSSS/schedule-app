@@ -28,8 +28,11 @@ internal enum class DevToolsCdpMethod(val protocolName: String) {
 internal enum class DevToolsCdpFailure {
     INVALID_WEBSOCKET_URL,
     UNSUPPORTED_WEBSOCKET_SCHEME,
-    HANDSHAKE_REJECTED,
     HANDSHAKE_INVALID,
+    CDP_HANDSHAKE_ACCEPTED,
+    CDP_REJECTED_ORIGIN,
+    CDP_REJECTED_HOST,
+    CDP_REJECTED_OTHER,
     TIMEOUT,
     STREAM_CLOSED,
     IO_ERROR,
@@ -42,9 +45,34 @@ internal enum class DevToolsCdpFailure {
 }
 
 internal sealed interface DevToolsCdpConnectResult {
-    data class Connected(val client: DevToolsCdpClient) : DevToolsCdpConnectResult
-    data class Failed(val failure: DevToolsCdpFailure) : DevToolsCdpConnectResult
+    data class Connected(
+        val client: DevToolsCdpClient,
+        val handshakeDiagnostic: DevToolsHandshakeDiagnostic
+    ) : DevToolsCdpConnectResult
+
+    data class Failed(
+        val failure: DevToolsCdpFailure,
+        val handshakeDiagnostic: DevToolsHandshakeDiagnostic? = null
+    ) : DevToolsCdpConnectResult
 }
+
+internal data class DevToolsHandshakeRequestDiagnostic(
+    val headerNames: List<String>,
+    val hostHeaderValue: String?,
+    val originHeaderSent: Boolean,
+    val originHeaderValue: String?,
+    val upgradeHeaderValue: String?,
+    val connectionHeaderValue: String?,
+    val webSocketVersionHeaderValue: String?
+)
+
+internal data class DevToolsHandshakeDiagnostic(
+    val responseStatus: Int?,
+    val responseReason: String?,
+    val responseBodySummary: String,
+    val request: DevToolsHandshakeRequestDiagnostic,
+    val classification: DevToolsCdpFailure
+)
 
 internal sealed interface DevToolsCdpCommandResult {
     class Success(internal val result: JSONObject) : DevToolsCdpCommandResult {
@@ -260,24 +288,27 @@ internal class DevToolsCdpClient private constructor(
                 val output = stream.openOutputStream()
                 val keyBytes = ByteArray(16).also(SecureRandom()::nextBytes)
                 val key = encodeBase64(keyBytes)
+                val requestDiagnostic = websocketHandshakeRequestDiagnostic(uri)
                 val request = buildWebSocketHandshakeRequest(uri, key)
                 output.write(request)
                 output.flush()
                 val handshake = withTimeoutOrNull(timeoutMs) {
                     readWebSocketHandshake(input, stream)
                 } ?: return@withContext closeAndFail(stream, DevToolsCdpFailure.TIMEOUT)
-                when (val parsed = validateWebSocketHandshake(handshake.headerBytes, key)) {
-                    HandshakeValidation.Accepted ->
+                val responseBytes = handshake.headerBytes + handshake.remainingBytes
+                when (val parsed = validateWebSocketHandshake(responseBytes, key, requestDiagnostic)) {
+                    is HandshakeValidation.Accepted ->
                         DevToolsCdpConnectResult.Connected(
                             DevToolsCdpClient(
                                 stream = stream,
                                 input = input,
                                 output = output,
                                 initialBytes = handshake.remainingBytes
-                            )
+                            ),
+                            parsed.diagnostic
                         )
                     is HandshakeValidation.Rejected ->
-                        closeAndFail(stream, parsed.failure)
+                        closeAndFail(stream, parsed.failure, parsed.diagnostic)
                 }
             } catch (cancelled: CancellationException) {
                 runCatching { stream.close() }
@@ -291,9 +322,13 @@ internal class DevToolsCdpClient private constructor(
             }
         }
 
-        private fun closeAndFail(stream: AdbStream, failure: DevToolsCdpFailure): DevToolsCdpConnectResult.Failed {
+        private fun closeAndFail(
+            stream: AdbStream,
+            failure: DevToolsCdpFailure,
+            handshakeDiagnostic: DevToolsHandshakeDiagnostic? = null
+        ): DevToolsCdpConnectResult.Failed {
             runCatching { stream.close() }
-            return DevToolsCdpConnectResult.Failed(failure)
+            return DevToolsCdpConnectResult.Failed(failure, handshakeDiagnostic)
         }
     }
 }
@@ -363,8 +398,7 @@ internal fun buildWebSocketHandshakeRequest(uri: URI, key: String): ByteArray {
     val path = uri.rawPath.orEmpty().ifBlank { "/" }
     val requestTarget = path + uri.rawQuery?.let { "?$it" }.orEmpty()
     require(requestTarget.none(Char::isISOControl))
-    val authority = uri.rawAuthority?.takeIf(String::isNotBlank)
-        ?: uri.host ?: throw IllegalArgumentException("Missing WebSocket authority")
+    val authority = safeWebSocketAuthority(uri)
     require(authority.none(Char::isISOControl) && '@' !in authority)
     return (
         "GET $requestTarget HTTP/1.1\r\n" +
@@ -377,37 +411,163 @@ internal fun buildWebSocketHandshakeRequest(uri: URI, key: String): ByteArray {
         ).toByteArray(StandardCharsets.US_ASCII)
 }
 
-internal fun validateWebSocketHandshake(headerBytes: ByteArray, key: String): HandshakeValidation {
-    val headerEnd = findHandshakeHeaderEnd(headerBytes)
-        ?: return HandshakeValidation.Rejected(DevToolsCdpFailure.HANDSHAKE_INVALID)
-    val text = String(headerBytes, 0, headerEnd, StandardCharsets.ISO_8859_1)
+internal fun websocketHandshakeRequestDiagnostic(uri: URI): DevToolsHandshakeRequestDiagnostic =
+    DevToolsHandshakeRequestDiagnostic(
+        headerNames = listOf(
+            "Host",
+            "Upgrade",
+            "Connection",
+            "Sec-WebSocket-Key",
+            "Sec-WebSocket-Version",
+            "Origin"
+        ),
+        hostHeaderValue = safeWebSocketAuthority(uri),
+        originHeaderSent = true,
+        originHeaderValue = "http://localhost",
+        upgradeHeaderValue = "websocket",
+        connectionHeaderValue = "Upgrade",
+        webSocketVersionHeaderValue = "13"
+    )
+
+internal fun validateWebSocketHandshake(
+    responseBytes: ByteArray,
+    key: String,
+    request: DevToolsHandshakeRequestDiagnostic = emptyHandshakeRequestDiagnostic()
+): HandshakeValidation {
+    val headerEnd = findHandshakeHeaderEnd(responseBytes)
+        ?: return HandshakeValidation.Rejected(
+            DevToolsCdpFailure.HANDSHAKE_INVALID,
+            diagnostic = diagnostic(
+                statusLine = "",
+                bodyBytes = ByteArray(0),
+                request = request,
+                classification = DevToolsCdpFailure.CDP_REJECTED_OTHER
+            )
+        )
+    val text = String(responseBytes, 0, headerEnd, StandardCharsets.ISO_8859_1)
     val lines = text.split("\r\n")
-    val status = lines.firstOrNull().orEmpty()
-    if (!status.startsWith("HTTP/1.1 101 ") && status != "HTTP/1.1 101") {
-        return HandshakeValidation.Rejected(DevToolsCdpFailure.HANDSHAKE_REJECTED)
-    }
+    val statusLine = lines.firstOrNull().orEmpty()
     val headers = lines.drop(1).mapNotNull { line ->
         val colon = line.indexOf(':')
         if (colon <= 0) null else {
             line.substring(0, colon).trim().lowercase(Locale.ROOT) to line.substring(colon + 1).trim()
         }
     }.toMap()
+    val bodyStart = (headerEnd).coerceAtMost(responseBytes.size)
+    val bodyBytes = responseBytes.copyOfRange(bodyStart, responseBytes.size)
+    val statusCode = HTTP_STATUS_PATTERN.find(statusLine)?.groupValues?.getOrNull(1)?.toIntOrNull()
+    val isSwitchingProtocols =
+        statusLine.startsWith("HTTP/1.1 101 ") || statusLine == "HTTP/1.1 101"
+    if (!isSwitchingProtocols) {
+        val rejection = classifyHandshakeRejection(statusCode, bodyBytes)
+        return HandshakeValidation.Rejected(
+            rejection,
+            diagnostic(statusLine, bodyBytes, request, rejection)
+        )
+    }
+
     val expectedAccept = encodeBase64(
         MessageDigest.getInstance("SHA-1")
             .digest((key + WEBSOCKET_GUID).toByteArray(StandardCharsets.US_ASCII))
     )
     val upgrade = headers["upgrade"].orEmpty()
     val connection = headers["connection"].orEmpty()
-    return if (
+    val valid =
         upgrade.equals("websocket", ignoreCase = true) &&
-        connection.split(',').any { it.trim().equals("upgrade", ignoreCase = true) } &&
-        headers["sec-websocket-accept"] == expectedAccept
-    ) {
-        HandshakeValidation.Accepted
+            connection.split(',').any { it.trim().equals("upgrade", ignoreCase = true) } &&
+            headers["sec-websocket-accept"] == expectedAccept
+    return if (valid) {
+        HandshakeValidation.Accepted(
+            diagnostic(
+                statusLine,
+                bodyBytes,
+                request,
+                DevToolsCdpFailure.CDP_HANDSHAKE_ACCEPTED
+            )
+        )
     } else {
-        HandshakeValidation.Rejected(DevToolsCdpFailure.HANDSHAKE_INVALID)
+        HandshakeValidation.Rejected(
+            DevToolsCdpFailure.HANDSHAKE_INVALID,
+            diagnostic(
+                statusLine,
+                bodyBytes,
+                request,
+                DevToolsCdpFailure.CDP_REJECTED_OTHER
+            )
+        )
     }
 }
+
+private fun diagnostic(
+    statusLine: String,
+    bodyBytes: ByteArray,
+    request: DevToolsHandshakeRequestDiagnostic,
+    classification: DevToolsCdpFailure
+): DevToolsHandshakeDiagnostic {
+    val match = HTTP_STATUS_PATTERN.find(statusLine)
+    val reason = match?.groupValues?.getOrNull(2)
+        ?.takeIf(String::isNotBlank)
+        ?.let(::sanitizeResponseReason)
+    return DevToolsHandshakeDiagnostic(
+        responseStatus = match?.groupValues?.getOrNull(1)?.toIntOrNull(),
+        responseReason = reason,
+        responseBodySummary = summarizeResponseBody(bodyBytes),
+        request = request,
+        classification = classification
+    )
+}
+
+private fun classifyHandshakeRejection(statusCode: Int?, bodyBytes: ByteArray): DevToolsCdpFailure {
+    val body = bodyBytes
+        .take(MAX_HANDSHAKE_BODY_SUMMARY_BYTES)
+        .toByteArray()
+        .toString(StandardCharsets.UTF_8)
+        .lowercase(Locale.ROOT)
+    val rejectionWordPresent = listOf("reject", "denied", "disallow", "blocked", "forbidden", "not allowed")
+        .any(body::contains)
+    return when {
+        body.contains("origin") && (rejectionWordPresent || statusCode == 403) ->
+            DevToolsCdpFailure.CDP_REJECTED_ORIGIN
+        body.contains("host") && (rejectionWordPresent || statusCode == 403 || statusCode == 400) ->
+            DevToolsCdpFailure.CDP_REJECTED_HOST
+        else -> DevToolsCdpFailure.CDP_REJECTED_OTHER
+    }
+}
+
+private fun summarizeResponseBody(bodyBytes: ByteArray): String {
+    if (bodyBytes.isEmpty()) return "空正文"
+    val sample = bodyBytes.take(MAX_HANDSHAKE_BODY_SUMMARY_BYTES).toByteArray()
+        .toString(StandardCharsets.UTF_8).lowercase(Locale.ROOT)
+    val byteCount = bodyBytes.size
+    return when {
+        sample.contains("origin") && listOf("reject", "denied", "disallow", "blocked", "forbidden", "not allowed")
+            .any(sample::contains) -> "正文提示 Origin 被拒绝 · ${byteCount}B"
+        sample.contains("host") && listOf("reject", "denied", "disallow", "blocked", "forbidden", "not allowed")
+            .any(sample::contains) -> "正文提示 Host 被拒绝 · ${byteCount}B"
+        else -> "存在响应正文（内容已隐藏）· ${byteCount}B"
+    }
+}
+
+private fun sanitizeResponseReason(value: String): String = RESPONSE_URL_PATTERN
+    .replace(value) { "<URL>" }
+    .substringBefore('?')
+    .substringBefore('#')
+    .filterNot(Char::isISOControl)
+    .take(MAX_RESPONSE_REASON_CHARS)
+
+private fun safeWebSocketAuthority(uri: URI): String =
+    uri.rawAuthority?.takeIf(String::isNotBlank)
+        ?: uri.host ?: throw IllegalArgumentException("Missing WebSocket authority")
+
+private fun emptyHandshakeRequestDiagnostic() = DevToolsHandshakeRequestDiagnostic(
+    headerNames = emptyList(),
+    hostHeaderValue = null,
+    originHeaderSent = false,
+    originHeaderValue = null,
+    upgradeHeaderValue = null,
+    connectionHeaderValue = null,
+    webSocketVersionHeaderValue = null
+)
 
 private fun encodeBase64(bytes: ByteArray): String {
     val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -429,8 +589,11 @@ private fun encodeBase64(bytes: ByteArray): String {
 }
 
 internal sealed interface HandshakeValidation {
-    data object Accepted : HandshakeValidation
-    data class Rejected(val failure: DevToolsCdpFailure) : HandshakeValidation
+    data class Accepted(val diagnostic: DevToolsHandshakeDiagnostic) : HandshakeValidation
+    data class Rejected(
+        val failure: DevToolsCdpFailure,
+        val diagnostic: DevToolsHandshakeDiagnostic
+    ) : HandshakeValidation
 }
 
 internal sealed interface CdpWebSocketFrameParseResult {
@@ -602,4 +765,8 @@ private const val MAX_CDP_MESSAGE_BYTES = 512 * 1024
 private const val CDP_READ_CHUNK_BYTES = 4 * 1024
 private const val CDP_CONNECT_TIMEOUT_MS = 5_000L
 private const val CDP_COMMAND_TIMEOUT_MS = 5_000L
+private const val MAX_HANDSHAKE_BODY_SUMMARY_BYTES = 1_024
+private const val MAX_RESPONSE_REASON_CHARS = 120
+private val HTTP_STATUS_PATTERN = Regex("^HTTP/\\d(?:\\.\\d)?\\s+(\\d{3})(?:\\s+([^\\r\\n]*))?")
+private val RESPONSE_URL_PATTERN = Regex("(?i)\\b(?:https?|wss?)://[^\\s\"'<>]+")
 private const val CDP_POLL_INTERVAL_MS = 20L

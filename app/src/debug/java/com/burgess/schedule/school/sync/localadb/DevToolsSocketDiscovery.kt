@@ -30,7 +30,8 @@ internal data class DevToolsTargetDiscoveryResult(
     val attempts: List<DevToolsSocketAttempt>,
     val targets: List<DevToolsTarget>,
     val endpointUsed: DevToolsEndpoint?,
-    val cdpFailure: DevToolsCdpFailure? = null
+    val cdpFailure: DevToolsCdpFailure? = null,
+    val cdpHandshakeDiagnostic: DevToolsHandshakeDiagnostic? = null
 )
 
 internal fun findDevToolsSocketCandidates(sockets: List<NamedUnixSocket>): List<DevToolsSocketCandidate> =
@@ -84,6 +85,7 @@ internal suspend fun discoverDevToolsTargets(
     var candidateUrlMissing = false
     var endpointUsed: DevToolsEndpoint? = null
     var cdpFailure: DevToolsCdpFailure? = null
+    var cdpHandshakeDiagnostic: DevToolsHandshakeDiagnostic? = null
 
     for (candidate in candidates) {
         var firstProbe = requestFromSocket(client, candidate, DevToolsEndpoint.JSON_LIST, onState)
@@ -219,38 +221,14 @@ internal suspend fun discoverDevToolsTargets(
         when (val connected = DevToolsCdpClient.connect(stream, cdpEndpoint.rawWebSocketUrl)) {
             is DevToolsCdpConnectResult.Failed -> {
                 cdpFailure = connected.failure
+                cdpHandshakeDiagnostic = connected.handshakeDiagnostic
                 onState(DevToolsDiscoveryState.CDP_CONNECT_FAILED)
             }
             is DevToolsCdpConnectResult.Connected -> {
+                cdpHandshakeDiagnostic = connected.handshakeDiagnostic
                 onState(DevToolsDiscoveryState.CDP_CONNECT_SUCCESS)
-                val resolution = connected.client.use { session ->
-                    resolveTargetUrlViaCdp(session, onState)
-                }
-                when (resolution) {
-                    is DevToolsCdpUrlResolution.Failed -> cdpFailure = resolution.failure
-                    is DevToolsCdpUrlResolution.Resolved -> {
-                        candidateUrlMissing = false
-                        val resolvedTarget = mergedCandidate.target.withResolvedUrl(
-                            resolution.url,
-                            resolution.source
-                        )
-                        targets.removeAll {
-                            it.socketName == resolvedTarget.socketName && it.id == resolvedTarget.id
-                        }
-                        targets += resolvedTarget
-                        if (resolvedTarget.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND) {
-                            onState(DevToolsDiscoveryState.SCHOOL_TARGET_FOUND)
-                            return result(
-                                DevToolsDiscoveryState.SCHOOL_TARGET_FOUND,
-                                candidates,
-                                attempts,
-                                targets,
-                                endpointUsed,
-                                null
-                            )
-                        }
-                    }
-                }
+                // Phase 3.2 diagnoses the handshake only; it must not send a CDP method.
+                connected.client.close()
             }
         }
     }
@@ -266,7 +244,15 @@ internal suspend fun discoverDevToolsTargets(
         else -> DevToolsDiscoveryState.DEVTOOLS_SOCKET_OPEN_FAILED
     }
     onState(finalState)
-    return result(finalState, candidates, attempts, targets, endpointUsed, cdpFailure)
+    return result(
+        finalState,
+        candidates,
+        attempts,
+        targets,
+        endpointUsed,
+        cdpFailure,
+        cdpHandshakeDiagnostic
+    )
 }
 
 private fun parseResponse(
@@ -296,18 +282,22 @@ private fun DevToolsTarget.isSchoolTitleCandidate(): Boolean =
         title == SCHOOL_TITLE
 
 private fun DevToolsTarget.isUrlMissing(): Boolean =
-    endpointSummaries.isNotEmpty() && endpointSummaries.all {
+    host.isNullOrBlank() && endpointSummaries.isNotEmpty() && endpointSummaries.all {
         it.urlKind in setOf(
             TargetUrlValueKind.MISSING,
             TargetUrlValueKind.NULL,
             TargetUrlValueKind.EMPTY,
             TargetUrlValueKind.INVALID_URL,
-            TargetUrlValueKind.OTHER_VALUE
+            TargetUrlValueKind.OTHER_VALUE,
+            TargetUrlValueKind.HTTP_URL,
+            TargetUrlValueKind.HTTP_URL_LENIENT,
+            TargetUrlValueKind.NON_HTTP_URL,
+            TargetUrlValueKind.NON_HTTP_URL_LENIENT
         )
     }
 
 private fun DevToolsTarget.hasHttpUrl(): Boolean =
-    endpointSummaries.any { it.urlKind == TargetUrlValueKind.HTTP_URL }
+    host != null && endpointSummaries.any { it.urlKind.isHttpUrl() }
 
 private fun DevToolsTarget.withResolvedUrl(
     resolved: SanitizedTargetUrl,
@@ -331,7 +321,9 @@ private fun DevToolsTarget.withResolvedUrl(
             title,
             type,
             containerName,
-            kind
+            kind,
+            scheme = resolved.scheme,
+            path = resolved.path
         ),
         urlSource = source
     )
@@ -348,14 +340,16 @@ private fun result(
     attempts: List<DevToolsSocketAttempt>,
     targets: List<DevToolsTarget>,
     endpointUsed: DevToolsEndpoint?,
-    cdpFailure: DevToolsCdpFailure?
+    cdpFailure: DevToolsCdpFailure?,
+    cdpHandshakeDiagnostic: DevToolsHandshakeDiagnostic? = null
 ): DevToolsTargetDiscoveryResult = DevToolsTargetDiscoveryResult(
     finalState = state,
     candidates = candidates,
     attempts = attempts,
     targets = targets.distinctBy { Triple(it.socketName, it.id, it.displayUrl) },
     endpointUsed = endpointUsed,
-    cdpFailure = cdpFailure
+    cdpFailure = cdpFailure,
+    cdpHandshakeDiagnostic = cdpHandshakeDiagnostic
 )
 
 private suspend fun requestFromSocket(

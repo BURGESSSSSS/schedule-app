@@ -38,8 +38,9 @@ internal fun parseDevToolsTargetList(
             val title = target.safeString("title").take(MAX_TARGET_TITLE_CHARS)
             val urlField = target.fieldSummary("url")
             val rawUrl = target.safeString("url")
-            val sanitizedUrl = sanitizeDevToolsTargetUrl(rawUrl)
-            val urlKind = classifyUrlValue(target, urlField, sanitizedUrl)
+            val urlNormalization = TargetUrlNormalizer.normalize(rawUrl)
+            val sanitizedUrl = urlNormalization.url
+            val urlKind = classifyUrlValue(target, urlField, urlNormalization)
             val description = target.descriptionSummary()
             val fields = TARGET_DIAGNOSTIC_KEYS.map(target::fieldSummary)
             val websocketField = target.fieldSummary("webSocketDebuggerUrl")
@@ -53,7 +54,9 @@ internal fun parseDevToolsTargetList(
                 title = title,
                 type = type,
                 containerName = containerName,
-                urlKind = urlKind
+                urlKind = urlKind,
+                scheme = sanitizedUrl?.scheme,
+                path = sanitizedUrl?.path
             )
             val endpointSummary = DevToolsEndpointSummary(
                 endpoint = endpoint,
@@ -63,6 +66,8 @@ internal fun parseDevToolsTargetList(
                 title = title,
                 urlKind = urlKind,
                 urlStringLength = urlField.stringLength,
+                strictUrlParseFailureType = urlNormalization.strictParseFailureType,
+                strictUrlParseFailureIndex = urlNormalization.strictParseFailureIndex,
                 displayUrl = sanitizedUrl?.displayUrl.orEmpty(),
                 hasWebSocketDebuggerUrl = websocketField.kind == FIELD_STRING,
                 webSocketUrlStringLength = websocketField.stringLength,
@@ -86,9 +91,7 @@ internal fun parseDevToolsTargetList(
                         pathMatchesSchoolPage = type.equals("page", ignoreCase = true) &&
                             sanitizedUrl?.path == SCHOOL_PAGE_PATH,
                         schoolMatch = match,
-                        urlSource = endpoint.toTargetUrlSource().takeIf {
-                            urlKind == TargetUrlValueKind.HTTP_URL || urlKind == TargetUrlValueKind.NON_HTTP_URL
-                        },
+                        urlSource = endpoint.toTargetUrlSource(urlKind).takeIf { urlKind.isAnyValidUrl() },
                         endpointSummaries = listOf(endpointSummary)
                     ),
                     cdpEndpoint = cdpEndpoint
@@ -108,8 +111,20 @@ internal fun mergeTargetEndpointMetadata(
     val primaryTarget = preferred.target
     val otherTarget = additional.target
     val selected = when {
-        primaryTarget.endpointSummaries.any { it.urlKind == TargetUrlValueKind.HTTP_URL } -> primaryTarget
-        otherTarget.endpointSummaries.any { it.urlKind == TargetUrlValueKind.HTTP_URL } -> otherTarget
+        primaryTarget.host != null && primaryTarget.endpointSummaries.any {
+            it.urlKind == TargetUrlValueKind.HTTP_URL
+        } -> primaryTarget
+        otherTarget.host != null && otherTarget.endpointSummaries.any {
+            it.urlKind == TargetUrlValueKind.HTTP_URL
+        } -> otherTarget
+        primaryTarget.host != null && primaryTarget.endpointSummaries.any {
+            it.urlKind == TargetUrlValueKind.HTTP_URL_LENIENT
+        } -> primaryTarget
+        otherTarget.host != null && otherTarget.endpointSummaries.any {
+            it.urlKind == TargetUrlValueKind.HTTP_URL_LENIENT
+        } -> otherTarget
+        primaryTarget.host != null && primaryTarget.urlSource != null -> primaryTarget
+        otherTarget.host != null && otherTarget.urlSource != null -> otherTarget
         primaryTarget.urlSource != null -> primaryTarget
         otherTarget.urlSource != null -> otherTarget
         else -> primaryTarget
@@ -144,22 +159,23 @@ internal fun mergeTargetEndpointMetadata(
 internal fun classifyUrlValue(
     target: JSONObject,
     field: DevToolsFieldSummary,
-    sanitizedUrl: SanitizedTargetUrl?
+    normalization: TargetUrlNormalizationResult
 ): TargetUrlValueKind = when {
     !target.has("url") -> TargetUrlValueKind.MISSING
     target.isNull("url") -> TargetUrlValueKind.NULL
     field.kind == FIELD_OTHER -> TargetUrlValueKind.OTHER_VALUE
     field.kind == FIELD_EMPTY -> TargetUrlValueKind.EMPTY
-    sanitizedUrl == null -> TargetUrlValueKind.INVALID_URL
-    isHttpUrl(target.safeString("url")) -> TargetUrlValueKind.HTTP_URL
+    normalization.url == null -> TargetUrlValueKind.INVALID_URL
+    normalization.url.scheme.equals("http", ignoreCase = true) ||
+        normalization.url.scheme.equals("https", ignoreCase = true) ->
+        if (normalization.mode == TargetUrlNormalizationMode.LENIENT_BASE) {
+            TargetUrlValueKind.HTTP_URL_LENIENT
+        } else {
+            TargetUrlValueKind.HTTP_URL
+        }
+    normalization.mode == TargetUrlNormalizationMode.LENIENT_BASE -> TargetUrlValueKind.NON_HTTP_URL_LENIENT
     else -> TargetUrlValueKind.NON_HTTP_URL
 }
-
-private fun isHttpUrl(value: String): Boolean =
-    runCatching {
-        val scheme = java.net.URI(value).scheme
-        scheme.equals("http", ignoreCase = true) || scheme.equals("https", ignoreCase = true)
-    }.getOrDefault(false)
 
 private fun isSupportedWebSocketUrl(value: String): Boolean =
     runCatching {
@@ -220,9 +236,14 @@ private fun JSONObject.fieldSummary(name: String): DevToolsFieldSummary {
 private fun JSONObject.safeString(name: String): String =
     if (!has(name) || isNull(name)) "" else optString(name, "")
 
-private fun DevToolsEndpoint.toTargetUrlSource(): TargetUrlSource = when (this) {
-    DevToolsEndpoint.JSON_LIST -> TargetUrlSource.HTTP_JSON_LIST
-    DevToolsEndpoint.JSON -> TargetUrlSource.HTTP_JSON
+private fun DevToolsEndpoint.toTargetUrlSource(urlKind: TargetUrlValueKind): TargetUrlSource = when {
+    urlKind == TargetUrlValueKind.HTTP_URL_LENIENT || urlKind == TargetUrlValueKind.NON_HTTP_URL_LENIENT ->
+        when (this) {
+            DevToolsEndpoint.JSON_LIST -> TargetUrlSource.HTTP_JSON_LIST_LENIENT
+            DevToolsEndpoint.JSON -> TargetUrlSource.HTTP_JSON_LENIENT
+        }
+    this == DevToolsEndpoint.JSON_LIST -> TargetUrlSource.HTTP_JSON_LIST
+    else -> TargetUrlSource.HTTP_JSON
 }
 
 private const val MAX_TARGET_JSON_CHARS = 512 * 1024

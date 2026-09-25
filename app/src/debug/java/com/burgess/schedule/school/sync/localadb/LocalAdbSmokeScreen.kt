@@ -793,7 +793,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
                 Text(
-                    "扫描 /proc/net/unix 中的具名 abstract DevTools socket，通过 localabstract 读取 /json/list，并对“我的课表”候选比较 /json。只有两个 endpoint 都没有可用 URL 且候选带有有效 WebSocket 地址时，才连接该 Target；仅调用 Page.getFrameTree，必要时回退到 Page.getNavigationHistory。",
+                    "扫描具名 abstract DevTools socket，通过 localabstract 读取 /json/list 与必要的 /json。先规范化 HTTP metadata URL；只有仍无法确认 URL 时才诊断 WebSocket 握手。本阶段不发送 CDP 方法命令。",
                     style = AppType.body,
                     color = colors.ink
                 )
@@ -833,6 +833,30 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     result.cdpFailure?.let {
                         Text("CDP 安全诊断：${it.name}", style = AppType.caption, color = colors.mut)
                     }
+                    result.cdpHandshakeDiagnostic?.let { diagnostic ->
+                        SectionLabel("WebSocket 握手诊断")
+                        Text(
+                            "分类=${diagnostic.classification.name} · HTTP=${diagnostic.responseStatus ?: "无响应"} · reason=${diagnostic.responseReason ?: "无"}",
+                            style = AppType.caption,
+                            color = if (diagnostic.classification in setOf(
+                                    DevToolsCdpFailure.CDP_REJECTED_ORIGIN,
+                                    DevToolsCdpFailure.CDP_REJECTED_HOST,
+                                    DevToolsCdpFailure.CDP_REJECTED_OTHER
+                                )) colors.danger else colors.ink
+                        )
+                        Text("响应正文摘要：${diagnostic.responseBodySummary}", style = AppType.caption, color = colors.mut)
+                        Text("发送 Header 名称：${diagnostic.request.headerNames.joinToString().ifBlank { "无" }}", style = AppType.caption, color = colors.mut)
+                        Text(
+                            "Host=${diagnostic.request.hostHeaderValue ?: "无"} · Origin=${if (diagnostic.request.originHeaderSent) diagnostic.request.originHeaderValue ?: "值未知" else "未发送"}",
+                            style = AppType.caption,
+                            color = colors.mut
+                        )
+                        Text(
+                            "Upgrade=${diagnostic.request.upgradeHeaderValue ?: "无"} · Connection=${diagnostic.request.connectionHeaderValue ?: "无"} · Sec-WebSocket-Version=${diagnostic.request.webSocketVersionHeaderValue ?: "无"}",
+                            style = AppType.caption,
+                            color = colors.mut
+                        )
+                    }
                     result.attempts.forEach { attempt ->
                         Text(
                             "${attempt.endpointPath} · ${attempt.socketName.take(160)} · inode=${attempt.inode} · opened=${attempt.opened} · HTTP=${attempt.httpStatus ?: "—"} · targets=${attempt.targetCount ?: "—"}${attempt.failure?.let { " · $it" }.orEmpty()}",
@@ -863,6 +887,13 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                                     style = AppType.caption,
                                     color = colors.mut
                                 )
+                                if (metadata.strictUrlParseFailureType != null) {
+                                    Text(
+                                        "完整 URL 严格解析：${metadata.strictUrlParseFailureType}${metadata.strictUrlParseFailureIndex?.let { " · index=$it" }.orEmpty()}；原始 query/fragment 已隐藏",
+                                        style = AppType.caption,
+                                        color = colors.mut
+                                    )
+                                }
                                 Text(
                                     "description=${metadata.descriptionKind} · keys=${metadata.descriptionKeys.joinToString().ifBlank { "无" }}",
                                     style = AppType.caption,

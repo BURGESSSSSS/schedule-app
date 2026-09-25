@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.json.JSONObject
 
 class DevToolsTargetParserTest {
     @Test
@@ -25,6 +26,79 @@ class DevToolsTargetParserTest {
         assertEquals(TargetUrlValueKind.HTTP_URL, target.endpointSummaries.single().urlKind)
         assertFalse(target.displayUrl.contains("ticket"))
         assertFalse(target.displayUrl.contains("section"))
+    }
+
+    @Test
+    fun resolvesXWebUrlWithRawObjectLikeQueryFromHttpMetadata() {
+        val queryPrefix = "https://testjwgl.sdbi.edu.cn/h5/index.html?zlParam={%22mode%22:%22"
+        val querySuffix = "%22}"
+        val rawUrl = queryPrefix + "x".repeat(479 - queryPrefix.length - querySuffix.length) + querySuffix
+        val json = JSONObject()
+            .put("id", "page-1")
+            .put("type", "page")
+            .put("title", SCHOOL_TITLE)
+            .put("url", rawUrl)
+            .put("webSocketDebuggerUrl", "ws://127.0.0.1/devtools/page/page-1")
+            .toString()
+        val parsed = parseDevToolsTargetList(
+            "[$json]",
+            "@webview_devtools_remote_123",
+            weworkProcess(),
+            endpoint = DevToolsEndpoint.JSON_LIST
+        ) as DevToolsTargetParseResult.Parsed
+        val target = parsed.targets.single().target
+        val summary = target.endpointSummaries.single()
+
+        assertEquals(479, rawUrl.length)
+        assertEquals(479, summary.urlStringLength)
+        assertEquals(TargetUrlValueKind.HTTP_URL_LENIENT, summary.urlKind)
+        assertEquals("URISyntaxException", summary.strictUrlParseFailureType)
+        assertEquals(rawUrl.indexOf('{'), summary.strictUrlParseFailureIndex)
+        assertEquals(TargetUrlSource.HTTP_JSON_LIST_LENIENT, target.urlSource)
+        assertEquals("https://testjwgl.sdbi.edu.cn/h5/index.html", target.displayUrl)
+        assertEquals("testjwgl.sdbi.edu.cn", target.host)
+        assertEquals("/h5/index.html", target.path)
+        assertEquals(SchoolTargetMatch.SCHOOL_TARGET_FOUND, target.schoolMatch)
+        assertFalse(target.displayUrl.contains("zlParam"))
+        assertFalse(summary.toString().contains("APP_JW"))
+    }
+
+    @Test
+    fun lenientUrlFromJsonEndpointUsesSpecificSource() {
+        val rawUrl = "https://testjwgl.sdbi.edu.cn/h5/schedule.html?data={x}"
+        val parsed = parseDevToolsTargetList(
+            "[${JSONObject().put("id", "j").put("type", "page").put("title", SCHOOL_TITLE).put("url", rawUrl)}]",
+            "@webview_devtools_remote_123",
+            weworkProcess(),
+            endpoint = DevToolsEndpoint.JSON
+        ) as DevToolsTargetParseResult.Parsed
+
+        assertEquals(TargetUrlSource.HTTP_JSON_LENIENT, parsed.targets.single().target.urlSource)
+        assertEquals(SchoolTargetMatch.SCHOOL_TARGET_FOUND, parsed.targets.single().target.schoolMatch)
+    }
+
+    @Test
+    fun endpointMergePrefersAConfirmedHostOverHostlessStrictScheme() {
+        val socket = "@webview_devtools_remote_123"
+        val processes = weworkProcess()
+        val strictHostless = parseDevToolsTargetList(
+            "[${JSONObject().put("id", "same").put("type", "page").put("title", SCHOOL_TITLE).put("url", "http:relative").toString()}]",
+            socket,
+            processes,
+            endpoint = DevToolsEndpoint.JSON_LIST
+        ) as DevToolsTargetParseResult.Parsed
+        val lenientSchool = parseDevToolsTargetList(
+            "[${JSONObject().put("id", "same").put("type", "page").put("title", SCHOOL_TITLE).put("url", "https://testjwgl.sdbi.edu.cn/h5/index.html?x={y}").toString()}]",
+            socket,
+            processes,
+            endpoint = DevToolsEndpoint.JSON
+        ) as DevToolsTargetParseResult.Parsed
+
+        val merged = mergeTargetEndpointMetadata(strictHostless.targets.single(), lenientSchool.targets.single())
+
+        assertEquals("testjwgl.sdbi.edu.cn", merged.target.host)
+        assertEquals(TargetUrlSource.HTTP_JSON_LENIENT, merged.target.urlSource)
+        assertEquals(SchoolTargetMatch.SCHOOL_TARGET_FOUND, merged.target.schoolMatch)
     }
 
     @Test

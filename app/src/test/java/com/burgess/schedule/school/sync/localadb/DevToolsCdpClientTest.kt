@@ -1,6 +1,7 @@
 package com.burgess.schedule.school.sync.localadb
 
 import java.io.Closeable
+import java.net.URI
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -31,20 +32,83 @@ class DevToolsCdpClientTest {
                 "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
             ).toByteArray()
 
+        val request = websocketHandshakeRequestDiagnostic(URI("ws://127.0.0.1/devtools/page/target"))
+        val result = validateWebSocketHandshake(response, "dGhlIHNhbXBsZSBub25jZQ==", request)
+        assertTrue(result is HandshakeValidation.Accepted)
+        result as HandshakeValidation.Accepted
+        assertEquals(101, result.diagnostic.responseStatus)
+        assertEquals(DevToolsCdpFailure.CDP_HANDSHAKE_ACCEPTED, result.diagnostic.classification)
         assertEquals(
-            HandshakeValidation.Accepted,
-            validateWebSocketHandshake(response, "dGhlIHNhbXBsZSBub25jZQ==")
+            listOf("Host", "Upgrade", "Connection", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Origin"),
+            result.diagnostic.request.headerNames
         )
+        assertEquals("127.0.0.1", result.diagnostic.request.hostHeaderValue)
+        assertTrue(result.diagnostic.request.originHeaderSent)
+        assertEquals("http://localhost", result.diagnostic.request.originHeaderValue)
+        assertEquals("websocket", result.diagnostic.request.upgradeHeaderValue)
+        assertEquals("Upgrade", result.diagnostic.request.connectionHeaderValue)
+        assertEquals("13", result.diagnostic.request.webSocketVersionHeaderValue)
+        val requestText = String(
+            buildWebSocketHandshakeRequest(URI("ws://127.0.0.1/devtools/page/target"), "test-key")
+        )
+        val actualHeaderNames = requestText.substringBefore("\r\n\r\n")
+            .split("\r\n")
+            .drop(1)
+            .map { it.substringBefore(':') }
+        assertEquals(result.diagnostic.request.headerNames, actualHeaderNames)
+        assertTrue(requestText.contains("Origin: http://localhost\r\n"))
+        assertFalse(result.diagnostic.toString().contains("test-key"))
     }
 
     @Test
     fun rejectsInvalidWebSocketUpgradeHandshake() {
         val response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".toByteArray()
 
-        assertEquals(
-            HandshakeValidation.Rejected(DevToolsCdpFailure.HANDSHAKE_REJECTED),
-            validateWebSocketHandshake(response, "dGhlIHNhbXBsZSBub25jZQ==")
-        )
+        val result = validateWebSocketHandshake(response, "dGhlIHNhbXBsZSBub25jZQ==")
+        assertTrue(result is HandshakeValidation.Rejected)
+        result as HandshakeValidation.Rejected
+        assertEquals(DevToolsCdpFailure.CDP_REJECTED_OTHER, result.failure)
+        assertEquals(200, result.diagnostic.responseStatus)
+        assertEquals("OK", result.diagnostic.responseReason)
+        assertEquals("空正文", result.diagnostic.responseBodySummary)
+    }
+
+    @Test
+    fun classifiesOriginRejectionAndKeepsResponseSummarySafe() {
+        val response = (
+            "HTTP/1.1 403 Forbidden\r\n" +
+                "Content-Length: 99\r\n\r\n" +
+                "Rejected an incoming WebSocket connection from the http://localhost origin?secret=value"
+            ).toByteArray()
+        val request = websocketHandshakeRequestDiagnostic(URI("ws://127.0.0.1/devtools/page/target"))
+
+        val result = validateWebSocketHandshake(response, "unused-key", request)
+
+        assertTrue(result is HandshakeValidation.Rejected)
+        result as HandshakeValidation.Rejected
+        assertEquals(DevToolsCdpFailure.CDP_REJECTED_ORIGIN, result.failure)
+        assertEquals(403, result.diagnostic.responseStatus)
+        assertEquals("Forbidden", result.diagnostic.responseReason)
+        assertTrue(result.diagnostic.responseBodySummary.contains("Origin 被拒绝"))
+        assertFalse(result.diagnostic.responseBodySummary.contains("localhost"))
+        assertFalse(result.diagnostic.responseBodySummary.contains("secret"))
+        assertTrue(result.diagnostic.request.originHeaderSent)
+    }
+
+    @Test
+    fun distinguishesHostRejectionFromOtherHandshakeFailures() {
+        val hostRejected = validateWebSocketHandshake(
+            "HTTP/1.1 400 Bad Request\r\n\r\nHost header rejected".toByteArray(),
+            "unused-key"
+        ) as HandshakeValidation.Rejected
+        val other = validateWebSocketHandshake(
+            "HTTP/1.1 400 Bad Request\r\n\r\nMalformed request".toByteArray(),
+            "unused-key"
+        ) as HandshakeValidation.Rejected
+
+        assertEquals(DevToolsCdpFailure.CDP_REJECTED_HOST, hostRejected.failure)
+        assertEquals(DevToolsCdpFailure.CDP_REJECTED_OTHER, other.failure)
+        assertEquals("正文提示 Host 被拒绝 · 20B", hostRejected.diagnostic.responseBodySummary)
     }
 
     @Test

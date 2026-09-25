@@ -39,7 +39,9 @@ internal enum class TargetUrlValueKind {
     NULL,
     EMPTY,
     HTTP_URL,
+    HTTP_URL_LENIENT,
     NON_HTTP_URL,
+    NON_HTTP_URL_LENIENT,
     INVALID_URL,
     OTHER_VALUE
 }
@@ -68,6 +70,8 @@ internal data class DevToolsEndpointSummary(
     val title: String,
     val urlKind: TargetUrlValueKind,
     val urlStringLength: Int?,
+    val strictUrlParseFailureType: String?,
+    val strictUrlParseFailureIndex: Int?,
     val displayUrl: String,
     val hasWebSocketDebuggerUrl: Boolean,
     val webSocketUrlStringLength: Int?,
@@ -79,6 +83,8 @@ internal data class DevToolsEndpointSummary(
 internal enum class TargetUrlSource {
     HTTP_JSON_LIST,
     HTTP_JSON,
+    HTTP_JSON_LIST_LENIENT,
+    HTTP_JSON_LENIENT,
     CDP_PAGE_FRAME_TREE,
     CDP_NAVIGATION_HISTORY
 }
@@ -134,11 +140,13 @@ internal fun classifySchoolTarget(
     title: String,
     type: String = "page",
     containerName: String?,
-    urlKind: TargetUrlValueKind
+    urlKind: TargetUrlValueKind,
+    scheme: String? = null,
+    path: String? = null
 ): SchoolTargetMatch {
     if (!type.equals("page", ignoreCase = true)) return SchoolTargetMatch.NONE
     if (containerName != WEWORK_PACKAGE) return SchoolTargetMatch.NONE
-    if (urlKind != TargetUrlValueKind.HTTP_URL) {
+    if (!urlKind.isHttpUrl()) {
         return if (
             title == SCHOOL_TITLE && urlKind in setOf(
                 TargetUrlValueKind.MISSING,
@@ -153,51 +161,35 @@ internal fun classifySchoolTarget(
             SchoolTargetMatch.NONE
         }
     }
+    val isSchoolHttpsUrl =
+        scheme.equals("https", ignoreCase = true) &&
+            host.equals(SCHOOL_HOST, ignoreCase = true)
     if (title != SCHOOL_TITLE) {
-        return if (host.equals(SCHOOL_HOST, ignoreCase = true)) {
+        return if (isSchoolHttpsUrl) {
             SchoolTargetMatch.SCHOOL_HOST_TARGET_FOUND
         } else {
             SchoolTargetMatch.NONE
         }
     }
-    return if (host.equals(SCHOOL_HOST, ignoreCase = true)) {
+    val isKnownSchoolPath = path == SCHOOL_PAGE_PATH || path?.startsWith(SCHOOL_H5_PATH_PREFIX) == true
+    return if (isSchoolHttpsUrl && isKnownSchoolPath) {
         SchoolTargetMatch.SCHOOL_TARGET_FOUND
     } else {
         SchoolTargetMatch.NONE
     }
 }
 
-internal fun sanitizeDevToolsTargetUrl(value: String): SanitizedTargetUrl? {
-    if (value.isBlank() || value.length > MAX_TARGET_URL_CHARS) return null
-    return runCatching {
-        val uri = java.net.URI(value)
-        val scheme = uri.scheme?.takeIf(String::isNotBlank) ?: return null
-        val host = uri.host?.lowercase(java.util.Locale.ROOT)
-        if (host != null) {
-            val path = uri.rawPath.orEmpty().ifBlank { "/" }
-            SanitizedTargetUrl("$scheme://$host$path", scheme, host, path)
-        } else if (uri.isOpaque) {
-            val safePart = uri.rawSchemeSpecificPart.orEmpty()
-                .substringBefore('?')
-                .substringBefore('#')
-            val display = if (
-                scheme.equals("about", ignoreCase = true) &&
-                safePart.lowercase(java.util.Locale.ROOT) in setOf("blank", "srcdoc")
-            ) {
-                "$scheme:${safePart.lowercase(java.util.Locale.ROOT)}"
-            } else {
-                "$scheme:"
-            }
-            SanitizedTargetUrl(display, scheme, null, null)
-        } else {
-            val path = uri.rawPath.orEmpty()
-            SanitizedTargetUrl("$scheme:$path", scheme, null, path)
-        }
-    }.getOrNull()
-}
+internal fun sanitizeDevToolsTargetUrl(value: String): SanitizedTargetUrl? =
+    TargetUrlNormalizer.normalize(value).url
+
+internal fun TargetUrlValueKind.isHttpUrl(): Boolean =
+    this == TargetUrlValueKind.HTTP_URL || this == TargetUrlValueKind.HTTP_URL_LENIENT
+
+internal fun TargetUrlValueKind.isAnyValidUrl(): Boolean =
+    isHttpUrl() || this == TargetUrlValueKind.NON_HTTP_URL || this == TargetUrlValueKind.NON_HTTP_URL_LENIENT
 
 internal const val WEWORK_PACKAGE = "com.tencent.wework"
 internal const val SCHOOL_HOST = "testjwgl.sdbi.edu.cn"
 internal const val SCHOOL_TITLE = "我的课表"
 internal const val SCHOOL_PAGE_PATH = "/h5/index.html"
-private const val MAX_TARGET_URL_CHARS = 8_192
+internal const val SCHOOL_H5_PATH_PREFIX = "/h5/"
