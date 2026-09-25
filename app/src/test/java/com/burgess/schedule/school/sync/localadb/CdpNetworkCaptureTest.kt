@@ -217,6 +217,7 @@ class CdpNetworkCaptureTest {
         val summary = snapshots.last().recentRequests.single()
         assertEquals(CourseBodyState.COURSE_JSON_CONFIRMED, summary.bodyState)
         assertTrue(summary.payload?.isCourseSchedulePayload == true)
+        assertNotNull(summary.scheduleSnapshot)
         assertFalse(summary.toString().contains("private-course-name"))
     }
 

@@ -1,5 +1,7 @@
 package com.burgess.schedule.school.sync.localadb
 
+import com.burgess.schedule.school.sync.importpreview.SchoolScheduleSnapshot
+
 internal enum class CourseBodyState {
     WAITING_FOR_RESPONSE,
     WAITING_FOR_BODY,
@@ -28,6 +30,7 @@ internal data class CourseRequestSummary(
     val resourceType: String?,
     val bodyState: CourseBodyState,
     val payload: CoursePayloadSummary? = null,
+    val scheduleSnapshot: SchoolScheduleSnapshot? = null,
     val cdpErrorCode: Int? = null,
     val cdpErrorMessage: String? = null
 ) {
@@ -115,6 +118,7 @@ internal class CourseResponseCapture {
             is CourseBodyParseResult.Confirmed -> {
                 record.bodyState = CourseBodyState.COURSE_JSON_CONFIRMED
                 record.payload = result.summary
+                record.scheduleSnapshot = result.scheduleSnapshot
             }
             is CourseBodyParseResult.JsonUnconfirmed -> {
                 record.bodyState = CourseBodyState.BODY_JSON_UNCONFIRMED
@@ -164,6 +168,7 @@ internal class CourseResponseCapture {
         var resourceType: String? = null,
         var bodyState: CourseBodyState = CourseBodyState.WAITING_FOR_RESPONSE,
         var payload: CoursePayloadSummary? = null,
+        var scheduleSnapshot: SchoolScheduleSnapshot? = null,
         var cdpErrorCode: Int? = null,
         var cdpErrorMessage: String? = null
     ) {
@@ -178,6 +183,7 @@ internal class CourseResponseCapture {
             resourceType = resourceType,
             bodyState = bodyState,
             payload = payload,
+            scheduleSnapshot = scheduleSnapshot,
             cdpErrorCode = cdpErrorCode,
             cdpErrorMessage = cdpErrorMessage
         )

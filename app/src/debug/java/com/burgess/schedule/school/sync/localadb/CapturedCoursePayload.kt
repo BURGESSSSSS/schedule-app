@@ -2,6 +2,8 @@ package com.burgess.schedule.school.sync.localadb
 
 import android.os.Build
 import android.util.Base64
+import com.burgess.schedule.school.sync.importpreview.SchoolScheduleSnapshot
+import com.burgess.schedule.school.sync.importpreview.SdbiScheduleParser
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
@@ -24,7 +26,10 @@ internal data class CoursePayloadSummary(
 )
 
 internal sealed interface CourseBodyParseResult {
-    data class Confirmed(val summary: CoursePayloadSummary) : CourseBodyParseResult
+    data class Confirmed(
+        val summary: CoursePayloadSummary,
+        val scheduleSnapshot: SchoolScheduleSnapshot
+    ) : CourseBodyParseResult
     data class JsonUnconfirmed(val summary: CoursePayloadSummary) : CourseBodyParseResult
     data object NotJson : CourseBodyParseResult
     data object DecodeError : CourseBodyParseResult
@@ -86,7 +91,7 @@ internal fun parseCdpResponseBody(
             !json.scalarString("zc").isNullOrBlank() && weeks.isNotEmpty()
     )
     return if (summary.isCourseSchedulePayload) {
-        CourseBodyParseResult.Confirmed(summary)
+        CourseBodyParseResult.Confirmed(summary, SdbiScheduleParser.parse(json, summary))
     } else {
         CourseBodyParseResult.JsonUnconfirmed(summary)
     }

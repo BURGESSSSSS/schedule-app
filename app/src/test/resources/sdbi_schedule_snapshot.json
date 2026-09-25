@@ -1,0 +1,124 @@
+{
+  "xn": "2026",
+  "xq": "0",
+  "zc": "03",
+  "maxzc": 19,
+  "qssj": "2026-09-14",
+  "jssj": "2027-01-24",
+  "maxjc": 8,
+  "week1": [
+    {
+      "kcdm": "SDBI-001",
+      "kcmc": "示例课程甲",
+      "xf": "2",
+      "rkjs": "示例教师甲",
+      "rs": "40",
+      "skbj": "CLASS-01",
+      "jcxx": "1-2",
+      "xq": "东校区",
+      "skdd": " 实训中心E区 [示例教室101] ",
+      "jcdm": "01,02",
+      "skzs": "1-5,7-19周",
+      "dsz": "",
+      "jsdm": "T-001",
+      "skbjmc": "教学班甲",
+      "kcyhdm": "OFFER-001",
+      "rq": "",
+      "beginTime": "",
+      "endTime": "",
+      "liveUrl": null,
+      "bz": null
+    },
+    {
+      "kcdm": "SDBI-001",
+      "kcmc": "示例课程甲",
+      "xf": "2",
+      "rkjs": "示例教师甲",
+      "rs": "40",
+      "skbj": "CLASS-01",
+      "jcxx": "1-2",
+      "xq": "东校区",
+      "skdd": " 实训中心E区 [示例教室101] ",
+      "jcdm": "01,02",
+      "skzs": "1-5,7-19周",
+      "dsz": ""
+    }
+  ],
+  "week2": [
+    {
+      "kcdm": "SDBI-002",
+      "kcmc": "人工智能应用基础",
+      "xf": "3",
+      "rkjs": "示例教师乙",
+      "skbj": "CLASS-02",
+      "jcxx": "5-6",
+      "xq": "西校区",
+      "skdd": "地点 A",
+      "jcdm": "05,06",
+      "skzs": "9周"
+    }
+  ],
+  "week3": [
+    {
+      "kcdm": "SDBI-003",
+      "kcmc": "离散周课程",
+      "rkjs": "示例教师丙",
+      "skbj": "CLASS-03",
+      "jcxx": "3-4",
+      "skdd": "教学楼A201",
+      "jcdm": "03,04",
+      "skzs": "3,7,11,15,19周"
+    }
+  ],
+  "week4": [
+    {
+      "kcdm": "SDBI-004",
+      "kcmc": "空地点示例课",
+      "rkjs": "",
+      "skbj": "CLASS-04",
+      "jcxx": "7-8",
+      "skdd": "  ",
+      "jcdm": "07,08",
+      "skzs": "8周"
+    }
+  ],
+  "week5": [
+    {
+      "kcdm": "SDBI-002",
+      "kcmc": "人工智能应用基础",
+      "xf": "3",
+      "rkjs": "示例教师乙",
+      "skbj": "CLASS-02",
+      "jcxx": "5-6",
+      "xq": "西校区",
+      "skdd": "地点 B",
+      "jcdm": "05,06",
+      "skzs": "5,13,17周"
+    }
+  ],
+  "week6": [],
+  "week7": [
+    {
+      "kcdm": "SDBI-001",
+      "kcmc": "示例课程甲",
+      "xf": "2",
+      "rkjs": "示例教师甲",
+      "skbj": "CLASS-01",
+      "jcxx": "3-4",
+      "xq": "东校区",
+      "skdd": "教学楼B202",
+      "jcdm": "03,04",
+      "skzs": "1-19周"
+    },
+    {
+      "kcdm": "SDBI-005",
+      "kcmc": null,
+      "rkjs": "示例教师丁",
+      "skbj": "CLASS-05",
+      "jcxx": "1-2",
+      "skdd": "",
+      "jcdm": "01,02",
+      "skzs": "1周"
+    }
+  ]
+}

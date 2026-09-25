@@ -42,6 +42,11 @@ import com.burgess.schedule.ui.components.SubPageScaffold
 import com.burgess.schedule.ui.theme.AppSpace
 import com.burgess.schedule.ui.theme.AppType
 import com.burgess.schedule.ui.theme.LocalAppColors
+import com.burgess.schedule.school.sync.importpreview.SchoolCourseRule
+import com.burgess.schedule.school.sync.importpreview.SchoolImportMapper
+import com.burgess.schedule.school.sync.importpreview.SchoolImportPreview
+import com.burgess.schedule.school.sync.importpreview.SchoolImportPreviewSummary
+import com.burgess.schedule.school.sync.importpreview.SchoolParseWarning
 import io.github.muntashirakon.adb.AdbStream
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
@@ -210,6 +215,8 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var networkListenerState by remember { mutableStateOf("IDLE") }
     var networkSchoolRequestCount by remember { mutableStateOf(0) }
     var networkRequests by remember { mutableStateOf<List<CourseRequestSummary>>(emptyList()) }
+    var schoolImportPreview by remember { mutableStateOf<SchoolImportPreview?>(null) }
+    var previewRequestNumber by remember { mutableStateOf<Int?>(null) }
     var networkMainFrameUrl by remember { mutableStateOf<SanitizedTargetUrl?>(null) }
     var networkFailureDetail by remember { mutableStateOf<String?>(null) }
     var networkFinalState by remember { mutableStateOf<String?>(null) }
@@ -666,6 +673,8 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         networkListenerState = "CDP_CONNECT_START"
         networkSchoolRequestCount = 0
         networkRequests = emptyList()
+        schoolImportPreview = null
+        previewRequestNumber = null
         networkMainFrameUrl = null
         networkFailureDetail = null
         networkFinalState = null
@@ -1409,6 +1418,28 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                             )
                         }
                     }
+                    val confirmedRequest = networkRequests.lastOrNull {
+                        it.bodyState == CourseBodyState.COURSE_JSON_CONFIRMED && it.scheduleSnapshot != null
+                    }
+                    if (confirmedRequest != null) {
+                        PillButton(
+                            "生成课程导入预览",
+                            onClick = {
+                                val snapshot = confirmedRequest.scheduleSnapshot ?: return@PillButton
+                                val candidates = SchoolImportMapper.map(snapshot)
+                                schoolImportPreview = SchoolImportPreview(
+                                    candidates = candidates,
+                                    summary = SchoolImportPreviewSummary.from(snapshot, candidates)
+                                )
+                                previewRequestNumber = confirmedRequest.number
+                            },
+                            style = PillStyle.Primary
+                        )
+                        val preview = schoolImportPreview
+                        if (preview != null && previewRequestNumber == confirmedRequest.number) {
+                            SchoolImportPreviewPanel(confirmedRequest.scheduleSnapshot!!, preview)
+                        }
+                    }
                     networkFinalState?.let {
                         Text(it, style = AppType.body, color = colors.ink)
                     }
@@ -1639,6 +1670,165 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun SchoolImportPreviewPanel(
+    snapshot: com.burgess.schedule.school.sync.importpreview.SchoolScheduleSnapshot,
+    preview: SchoolImportPreview
+) {
+    val colors = LocalAppColors.current
+    SectionLabel("Phase 6A · Dry Run")
+    Text("SCHEDULE_PARSE_SUCCESS · SNAPSHOT_PREVIEW_READY", style = AppType.caption, color = colors.ink)
+    Text("来源：山东商务职业学院", style = AppType.body, color = colors.ink)
+    Text(
+        "学年：${snapshot.academicYear ?: "—"} · 学校学期标识：${snapshot.semesterFlag ?: "—"}",
+        style = AppType.caption,
+        color = colors.ink
+    )
+    Text(
+        "本次响应周：${snapshot.currentWeek ?: "—"} · 最大周：${snapshot.rawMaxWeek ?: "—"} · 学校最大节次：${snapshot.rawMaxSection ?: "—"}",
+        style = AppType.caption,
+        color = colors.ink
+    )
+    Text(
+        "周起止日期：${snapshot.weekStartDateText ?: "—"} ~ ${snapshot.weekEndDateText ?: "—"}",
+        style = AppType.caption,
+        color = colors.mut
+    )
+    Text(
+        "规则：${preview.summary.rawRuleCount} · 畸形项：${preview.summary.malformedRuleCount} · 精确重复：${preview.summary.exactDuplicateCount} · 去重后：${preview.summary.uniqueRuleCount}",
+        style = AppType.caption,
+        color = colors.ink
+    )
+    Text(
+        "可映射规则：${preview.summary.importableRuleCount} · 按周展开可导入条目：${preview.summary.importableCount}",
+        style = AppType.caption,
+        color = colors.ink
+    )
+    Text(
+        "有警告：${preview.summary.warningRuleCount} 条规则 · 快照警告：${preview.summary.snapshotWarningCount}",
+        style = AppType.caption,
+        color = if (preview.summary.warningRuleCount + preview.summary.snapshotWarningCount > 0) colors.mut else colors.ink
+    )
+    Text(
+        "当前预览基于本次学校课表响应，不代表已完成整学期完整性校验。",
+        style = AppType.caption,
+        color = colors.mut
+    )
+
+    val candidatesByRule = preview.candidates.groupBy { it.sourceRuleKey }
+    val weekdayLabels = listOf("一", "二", "三", "四", "五", "六", "日")
+    snapshot.courseRules
+        .groupBy { it.courseName?.takeIf(String::isNotBlank) ?: "（课程名称缺失）" }
+        .forEach { (courseName, rules) ->
+            SectionLabel(courseName)
+            rules.forEachIndexed { index, rule ->
+                SchoolImportRulePreview(
+                    rule = rule,
+                    ruleIndex = index + 1,
+                    candidates = candidatesByRule[rule.ruleKey].orEmpty(),
+                    weekdayLabel = weekdayLabels[(rule.dayOfWeek - 1).coerceIn(0, 6)]
+                )
+            }
+        }
+    Text("ID、课程颜色、周视图简称：IMPORT_DEFAULT（未生成正式值）", style = AppType.caption, color = colors.mut)
+    Text("导入功能将在下一阶段开放。", style = AppType.caption, color = colors.mut)
+}
+
+@Composable
+private fun SchoolImportRulePreview(
+    rule: SchoolCourseRule,
+    ruleIndex: Int,
+    candidates: List<com.burgess.schedule.school.sync.importpreview.SchoolImportCandidate>,
+    weekdayLabel: String
+) {
+    val colors = LocalAppColors.current
+    val sectionLabel = when {
+        rule.startSection == null || rule.endSection == null -> rule.sectionText?.takeIf(String::isNotBlank) ?: "节次未解析"
+        rule.startSection == rule.endSection -> "${rule.startSection}节"
+        else -> "${rule.startSection}-${rule.endSection}节"
+    }
+    Text(
+        "规则 $ruleIndex · 周$weekdayLabel · $sectionLabel",
+        style = AppType.body,
+        color = colors.ink
+    )
+    Text(
+        "教师：${rule.teacher?.takeIf(String::isNotBlank) ?: "未提供"}",
+        style = AppType.caption,
+        color = colors.mut
+    )
+    Text(
+        "地点：${rule.displayLocation ?: "未提供"}",
+        style = AppType.caption,
+        color = colors.mut
+    )
+    val parsedWeeks = formatPreviewWeeks(rule.weeks).ifBlank { "未解析" }
+    val rawWeekSuffix = if (
+        rule.weekParseStatus == com.burgess.schedule.school.sync.importpreview.RuleParseStatus.SUCCESS
+    ) {
+        ""
+    } else {
+        " · 原文：${rule.rawWeekText?.ifBlank { "未提供" } ?: "未提供"}"
+    }
+    Text(
+        "周次：$parsedWeeks$rawWeekSuffix",
+        style = AppType.caption,
+        color = colors.ink
+    )
+    Text(
+        "映射：${candidates.count { it.importable }} 条单周课程记录",
+        style = AppType.caption,
+        color = colors.ink
+    )
+    val warningLabels = (rule.warnings + candidates.flatMap { it.warnings })
+        .filterNot { it == SchoolParseWarning.IMPORT_DEFAULT }
+        .distinct()
+        .map(::schoolWarningLabel)
+    if (warningLabels.isNotEmpty()) {
+        Text(
+            warningLabels.joinToString(" · "),
+            style = AppType.caption,
+            color = colors.mut
+        )
+    }
+    if (candidates.any { !it.importable }) {
+        Text("此规则未计入可导入条目，请核对节次、课程名或周次。", style = AppType.caption, color = colors.mut)
+    }
+}
+
+private fun formatPreviewWeeks(weeks: List<Int>): String {
+    if (weeks.isEmpty()) return ""
+    val ranges = mutableListOf<String>()
+    var start = weeks.first()
+    var end = start
+    weeks.drop(1).forEach { week ->
+        if (week == end + 1) {
+            end = week
+        } else {
+            ranges += if (start == end) "$start" else "$start-$end"
+            start = week
+            end = week
+        }
+    }
+    ranges += if (start == end) "$start" else "$start-$end"
+    return "第" + ranges.joinToString("、") + "周"
+}
+
+private fun schoolWarningLabel(warning: SchoolParseWarning): String = when (warning) {
+    SchoolParseWarning.MISSING_COURSE_NAME -> "课程名缺失"
+    SchoolParseWarning.MISSING_TEACHER -> "教师缺失"
+    SchoolParseWarning.MISSING_LOCATION -> "地点缺失"
+    SchoolParseWarning.SECTION_PARSE_FAILED -> "节次无法解析"
+    SchoolParseWarning.WEEK_PARSE_FAILED -> "周次无法完整解析"
+    SchoolParseWarning.SECTION_MISMATCH -> "jcxx 与 jcdm 不一致"
+    SchoolParseWarning.WEEK_OUT_OF_RANGE -> "周次超出 maxzc"
+    SchoolParseWarning.ODD_EVEN_CONFLICT -> "单双周标记与 skzs 冲突"
+    SchoolParseWarning.DATE_PARSE_WARNING -> "日期格式异常"
+    SchoolParseWarning.NON_OBJECT_RULE -> "存在非课程对象项"
+    SchoolParseWarning.SECTION_OUT_OF_APP_RANGE -> "超出 App 当前 8 节范围"
+    SchoolParseWarning.IMPORT_DEFAULT -> "使用预览默认值"
 }
 
 @Composable
