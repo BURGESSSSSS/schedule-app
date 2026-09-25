@@ -440,6 +440,10 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 devToolsMessage = when (devToolsResult?.finalState) {
                     DevToolsDiscoveryState.SCHOOL_TARGET_FOUND -> "已发现山东商务职业学院教务系统 WebView。"
                     DevToolsDiscoveryState.SCHOOL_HOST_TARGET_FOUND -> "发现学校域名页面，但标题不是“我的课表”。"
+                    DevToolsDiscoveryState.SCHOOL_TARGET_CANDIDATE_URL_UNKNOWN ->
+                        "找到企业微信“我的课表”页面候选，但 URL 尚未确认。"
+                    DevToolsDiscoveryState.HTTP_TARGET_URL_MISSING ->
+                        "两个 HTTP discovery endpoint 都没有提供可用 URL；CDP 状态：${devToolsResult?.cdpFailure?.name ?: "未执行"}。"
                     DevToolsDiscoveryState.DEVTOOLS_CONNECTED_NO_SCHOOL_TARGET -> "DevTools HTTP 可用，尚未发现学校页面。"
                     DevToolsDiscoveryState.DEVTOOLS_SOCKET_NOT_FOUND -> "/proc/net/unix 读取成功，但没有符合规则的 abstract DevTools socket。"
                     DevToolsDiscoveryState.DEVTOOLS_SOCKET_OPEN_FAILED -> "发现候选 socket，但 localabstract 打开失败。查看各候选的安全错误类型。"
@@ -789,7 +793,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
                 Text(
-                    "扫描 /proc/net/unix 中的具名 abstract DevTools socket，再通过 localabstract 请求 /json/list；仅在该 endpoint 不受支持时尝试 /json。只显示 Target 的 id、type、title、脱敏 URL 和 socket 标识，不连接 WebSocket。",
+                    "扫描 /proc/net/unix 中的具名 abstract DevTools socket，通过 localabstract 读取 /json/list，并对“我的课表”候选比较 /json。只有两个 endpoint 都没有可用 URL 且候选带有有效 WebSocket 地址时，才连接该 Target；仅调用 Page.getFrameTree，必要时回退到 Page.getNavigationHistory。",
                     style = AppType.body,
                     color = colors.ink
                 )
@@ -826,6 +830,9 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                         style = AppType.caption,
                         color = colors.ink
                     )
+                    result.cdpFailure?.let {
+                        Text("CDP 安全诊断：${it.name}", style = AppType.caption, color = colors.mut)
+                    }
                     result.attempts.forEach { attempt ->
                         Text(
                             "${attempt.endpointPath} · ${attempt.socketName.take(160)} · inode=${attempt.inode} · opened=${attempt.opened} · HTTP=${attempt.httpStatus ?: "—"} · targets=${attempt.targetCount ?: "—"}${attempt.failure?.let { " · $it" }.orEmpty()}",
@@ -844,6 +851,36 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                                 Text("URL：${target.displayUrl}", style = AppType.caption, color = colors.ink)
                             }
                             Text("socket：${target.socketName.take(160)} · target id：${target.id.ifBlank { "（无）" }}", style = AppType.caption, color = colors.mut)
+                            Text("URL 来源：${target.urlSource?.name ?: "HTTP 中未取得"}", style = AppType.caption, color = colors.mut)
+                            target.endpointSummaries.forEach { metadata ->
+                                Text(
+                                    "${metadata.endpoint.path} · HTTP ${metadata.httpStatus} · id=${metadata.targetId} · type=${metadata.type} · title=${metadata.title.ifBlank { "（空）" }}",
+                                    style = AppType.caption,
+                                    color = colors.ink
+                                )
+                                Text(
+                                    "url=${metadata.urlKind} · 长度=${metadata.urlStringLength ?: "—"} · ${metadata.displayUrl.ifBlank { "无可显示 URL" }}",
+                                    style = AppType.caption,
+                                    color = colors.mut
+                                )
+                                Text(
+                                    "description=${metadata.descriptionKind} · keys=${metadata.descriptionKeys.joinToString().ifBlank { "无" }}",
+                                    style = AppType.caption,
+                                    color = colors.mut
+                                )
+                                Text(
+                                    "webSocketDebuggerUrl=${if (metadata.hasWebSocketDebuggerUrl) "存在" else "缺失"} · 长度=${metadata.webSocketUrlStringLength ?: "—"}",
+                                    style = AppType.caption,
+                                    color = colors.mut
+                                )
+                                Text(
+                                    "字段：" + metadata.fields.joinToString(" · ") { field ->
+                                        "${field.name}=${field.kind}${field.stringLength?.let { "($it)" }.orEmpty()}"
+                                    },
+                                    style = AppType.caption,
+                                    color = colors.mut
+                                )
+                            }
                             Text(
                                 "学校匹配：${target.schoolMatch.name}${if (target.pathMatchesSchoolPage) " · path 匹配 /h5/index.html" else ""}",
                                 style = AppType.caption,

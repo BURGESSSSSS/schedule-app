@@ -29,7 +29,8 @@ internal data class DevToolsTargetDiscoveryResult(
     val candidates: List<DevToolsSocketCandidate>,
     val attempts: List<DevToolsSocketAttempt>,
     val targets: List<DevToolsTarget>,
-    val endpointUsed: DevToolsEndpoint?
+    val endpointUsed: DevToolsEndpoint?,
+    val cdpFailure: DevToolsCdpFailure? = null
 )
 
 internal fun findDevToolsSocketCandidates(sockets: List<NamedUnixSocket>): List<DevToolsSocketCandidate> =
@@ -80,61 +81,175 @@ internal suspend fun discoverDevToolsTargets(
     var httpSucceeded = false
     var targetListParsed = false
     var targetListParseFailed = false
+    var candidateUrlMissing = false
     var endpointUsed: DevToolsEndpoint? = null
+    var cdpFailure: DevToolsCdpFailure? = null
 
     for (candidate in candidates) {
-        val processForSocket = pidStyleSuffix(candidate.socketName)?.let { pid ->
-            processes.firstOrNull { it.pid == pid }
-        }
-        var probe = requestFromSocket(client, candidate, DevToolsEndpoint.JSON_LIST, onState)
-        attempts += probe.attempt
-        openedAny = openedAny || probe.attempt.opened
+        var firstProbe = requestFromSocket(client, candidate, DevToolsEndpoint.JSON_LIST, onState)
+        attempts += firstProbe.attempt
+        openedAny = openedAny || firstProbe.attempt.opened
 
-        if (probe.response?.let { shouldTryLegacyDevToolsEndpoint(it.statusCode) } == true) {
-            probe = requestFromSocket(client, candidate, DevToolsEndpoint.JSON, onState)
-            attempts += probe.attempt
-            openedAny = openedAny || probe.attempt.opened
+        if (firstProbe.response?.let { shouldTryLegacyDevToolsEndpoint(it.statusCode) } == true) {
+            firstProbe = requestFromSocket(client, candidate, DevToolsEndpoint.JSON, onState)
+            attempts += firstProbe.attempt
+            openedAny = openedAny || firstProbe.attempt.opened
         }
 
-        val response = probe.response ?: continue
-        if (response.statusCode !in 200..299) continue
+        val firstResponse = firstProbe.response ?: continue
+        if (firstResponse.statusCode !in 200..299) continue
         httpSucceeded = true
-        endpointUsed = probe.endpoint
+        endpointUsed = firstProbe.endpoint
 
-        when (val parsed = parseDevToolsTargetList(response.body, candidate.socketName, processes)) {
-            DevToolsTargetParseResult.InvalidJson -> {
+        val firstParsed = parseResponse(firstResponse, firstProbe.endpoint, candidate, processes)
+        when (firstParsed) {
+            ParseResponse.Invalid -> {
                 targetListParseFailed = true
+                markLastAttemptFailure(attempts, "INVALID_JSON")
                 onState(DevToolsDiscoveryState.TARGET_LIST_PARSE_FAILED)
-                val lastIndex = attempts.lastIndex
-                if (lastIndex >= 0) {
-                    attempts[lastIndex] = attempts[lastIndex].copy(
-                        failure = "INVALID_JSON",
-                        targetCount = null
-                    )
-                }
+                continue
             }
-            is DevToolsTargetParseResult.Parsed -> {
+            is ParseResponse.Valid -> {
                 targetListParsed = true
                 onState(DevToolsDiscoveryState.TARGET_LIST_PARSED)
-                val parsedTargets = parsed.targets.map { target ->
-                    if (processForSocket == null) target else target.copy(
-                        processName = processForSocket.processName,
-                        containerName = processForSocket.processName.substringBefore(':')
-                    )
-                }
-                targets += parsedTargets
-                val lastIndex = attempts.lastIndex
-                if (lastIndex >= 0) attempts[lastIndex] = attempts[lastIndex].copy(targetCount = parsedTargets.size)
+            }
+        }
+        val firstEntries = (firstParsed as ParseResponse.Valid).targets
+        targets += displayableTargets(firstEntries)
+        val pageCandidate = firstEntries.firstOrNull {
+            it.target.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND
+        } ?: firstEntries.firstOrNull { it.target.isSchoolTitleCandidate() }
+        if (pageCandidate == null) continue
 
-                if (parsedTargets.any { it.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND }) {
-                    onState(DevToolsDiscoveryState.SCHOOL_TARGET_FOUND)
-                    return DevToolsTargetDiscoveryResult(
-                        finalState = DevToolsDiscoveryState.SCHOOL_TARGET_FOUND,
-                        candidates = candidates,
-                        attempts = attempts,
-                        targets = targets.distinctBy { Triple(it.socketName, it.id, it.displayUrl) },
-                        endpointUsed = endpointUsed
-                    )
+        onState(DevToolsDiscoveryState.TARGET_CANDIDATE_FOUND)
+        if (pageCandidate.target.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_CANDIDATE_URL_UNKNOWN) {
+            onState(DevToolsDiscoveryState.SCHOOL_TARGET_CANDIDATE_URL_UNKNOWN)
+        }
+        if (pageCandidate.target.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND) {
+            onState(DevToolsDiscoveryState.HTTP_TARGET_URL_FOUND)
+            onState(DevToolsDiscoveryState.SCHOOL_TARGET_FOUND)
+            return result(
+                DevToolsDiscoveryState.SCHOOL_TARGET_FOUND,
+                candidates,
+                attempts,
+                targets,
+                endpointUsed,
+                cdpFailure
+            )
+        }
+
+        if (pageCandidate.target.hasHttpUrl()) {
+            onState(DevToolsDiscoveryState.HTTP_TARGET_URL_FOUND)
+            continue
+        }
+
+        candidateUrlMissing = true
+        onState(DevToolsDiscoveryState.HTTP_TARGET_URL_MISSING)
+        var mergedCandidate = pageCandidate
+
+        if (firstProbe.endpoint == DevToolsEndpoint.JSON_LIST) {
+            val secondProbe = requestFromSocket(client, candidate, DevToolsEndpoint.JSON, onState)
+            attempts += secondProbe.attempt
+            openedAny = openedAny || secondProbe.attempt.opened
+            val secondResponse = secondProbe.response
+            if (secondResponse != null && secondResponse.statusCode in 200..299) {
+                httpSucceeded = true
+                endpointUsed = secondProbe.endpoint
+                when (val secondParsed = parseResponse(secondResponse, secondProbe.endpoint, candidate, processes)) {
+                    ParseResponse.Invalid -> {
+                        targetListParseFailed = true
+                        markLastAttemptFailure(attempts, "INVALID_JSON")
+                        onState(DevToolsDiscoveryState.TARGET_LIST_PARSE_FAILED)
+                    }
+                    is ParseResponse.Valid -> {
+                        targetListParsed = true
+                        onState(DevToolsDiscoveryState.TARGET_LIST_PARSED)
+                        val sameId = secondParsed.targets.firstOrNull {
+                            it.target.id == pageCandidate.target.id
+                        }
+                        mergedCandidate = mergeTargetEndpointMetadata(pageCandidate, sameId)
+                    }
+                }
+            }
+        }
+
+        targets.removeAll { it.socketName == candidate.socketName && it.id == mergedCandidate.target.id }
+        targets += mergedCandidate.target
+
+        if (mergedCandidate.target.hasHttpUrl()) {
+            candidateUrlMissing = false
+            onState(DevToolsDiscoveryState.HTTP_TARGET_URL_FOUND)
+            if (mergedCandidate.target.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND) {
+                onState(DevToolsDiscoveryState.SCHOOL_TARGET_FOUND)
+                return result(
+                    DevToolsDiscoveryState.SCHOOL_TARGET_FOUND,
+                    candidates,
+                    attempts,
+                    targets,
+                    endpointUsed,
+                    cdpFailure
+                )
+            }
+            continue
+        }
+
+        if (!mergedCandidate.target.isUrlMissing()) {
+            candidateUrlMissing = true
+            onState(DevToolsDiscoveryState.HTTP_TARGET_URL_MISSING)
+            continue
+        }
+
+        onState(DevToolsDiscoveryState.HTTP_TARGET_URL_MISSING)
+        val cdpEndpoint = mergedCandidate.cdpEndpoint
+        if (cdpEndpoint == null) {
+            cdpFailure = DevToolsCdpFailure.URL_MISSING
+            continue
+        }
+
+        onState(DevToolsDiscoveryState.CDP_CONNECT_START)
+        val stream = try {
+            client.openDevToolsSocket(cdpEndpoint.socketName)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            cdpFailure = DevToolsCdpFailure.IO_ERROR
+            onState(DevToolsDiscoveryState.CDP_CONNECT_FAILED)
+            continue
+        }
+        when (val connected = DevToolsCdpClient.connect(stream, cdpEndpoint.rawWebSocketUrl)) {
+            is DevToolsCdpConnectResult.Failed -> {
+                cdpFailure = connected.failure
+                onState(DevToolsDiscoveryState.CDP_CONNECT_FAILED)
+            }
+            is DevToolsCdpConnectResult.Connected -> {
+                onState(DevToolsDiscoveryState.CDP_CONNECT_SUCCESS)
+                val resolution = connected.client.use { session ->
+                    resolveTargetUrlViaCdp(session, onState)
+                }
+                when (resolution) {
+                    is DevToolsCdpUrlResolution.Failed -> cdpFailure = resolution.failure
+                    is DevToolsCdpUrlResolution.Resolved -> {
+                        candidateUrlMissing = false
+                        val resolvedTarget = mergedCandidate.target.withResolvedUrl(
+                            resolution.url,
+                            resolution.source
+                        )
+                        targets.removeAll {
+                            it.socketName == resolvedTarget.socketName && it.id == resolvedTarget.id
+                        }
+                        targets += resolvedTarget
+                        if (resolvedTarget.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND) {
+                            onState(DevToolsDiscoveryState.SCHOOL_TARGET_FOUND)
+                            return result(
+                                DevToolsDiscoveryState.SCHOOL_TARGET_FOUND,
+                                candidates,
+                                attempts,
+                                targets,
+                                endpointUsed,
+                                null
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -143,6 +258,7 @@ internal suspend fun discoverDevToolsTargets(
     val finalState = when {
         targets.any { it.schoolMatch == SchoolTargetMatch.SCHOOL_HOST_TARGET_FOUND } ->
             DevToolsDiscoveryState.SCHOOL_HOST_TARGET_FOUND
+        cdpFailure != null || candidateUrlMissing -> DevToolsDiscoveryState.HTTP_TARGET_URL_MISSING
         targetListParsed -> DevToolsDiscoveryState.DEVTOOLS_CONNECTED_NO_SCHOOL_TARGET
         httpSucceeded && targetListParseFailed -> DevToolsDiscoveryState.TARGET_LIST_PARSE_FAILED
         httpSucceeded -> DevToolsDiscoveryState.DEVTOOLS_HTTP_FAILED
@@ -150,14 +266,97 @@ internal suspend fun discoverDevToolsTargets(
         else -> DevToolsDiscoveryState.DEVTOOLS_SOCKET_OPEN_FAILED
     }
     onState(finalState)
-    return DevToolsTargetDiscoveryResult(
-        finalState = finalState,
-        candidates = candidates,
-        attempts = attempts,
-        targets = targets.distinctBy { Triple(it.socketName, it.id, it.displayUrl) },
-        endpointUsed = endpointUsed
+    return result(finalState, candidates, attempts, targets, endpointUsed, cdpFailure)
+}
+
+private fun parseResponse(
+    response: DevToolsHttpResponse,
+    endpoint: DevToolsEndpoint,
+    candidate: DevToolsSocketCandidate,
+    processes: List<WeWorkProcess>
+): ParseResponse = when (
+    val parsed = parseDevToolsTargetList(
+        response.body,
+        candidate.socketName,
+        processes,
+        endpoint,
+        response.statusCode
+    )
+) {
+    DevToolsTargetParseResult.InvalidJson -> ParseResponse.Invalid
+    is DevToolsTargetParseResult.Parsed -> ParseResponse.Valid(parsed.targets)
+}
+
+private fun displayableTargets(entries: List<ParsedDevToolsTarget>): List<DevToolsTarget> =
+    entries.map { it.target }.filter { it.containerName == WEWORK_PACKAGE && it.type.equals("page", true) }
+
+private fun DevToolsTarget.isSchoolTitleCandidate(): Boolean =
+    containerName == WEWORK_PACKAGE &&
+        type.equals("page", ignoreCase = true) &&
+        title == SCHOOL_TITLE
+
+private fun DevToolsTarget.isUrlMissing(): Boolean =
+    endpointSummaries.isNotEmpty() && endpointSummaries.all {
+        it.urlKind in setOf(
+            TargetUrlValueKind.MISSING,
+            TargetUrlValueKind.NULL,
+            TargetUrlValueKind.EMPTY,
+            TargetUrlValueKind.INVALID_URL,
+            TargetUrlValueKind.OTHER_VALUE
+        )
+    }
+
+private fun DevToolsTarget.hasHttpUrl(): Boolean =
+    endpointSummaries.any { it.urlKind == TargetUrlValueKind.HTTP_URL }
+
+private fun DevToolsTarget.withResolvedUrl(
+    resolved: SanitizedTargetUrl,
+    source: TargetUrlSource
+): DevToolsTarget {
+    val kind = if (
+        resolved.scheme.equals("http", ignoreCase = true) ||
+        resolved.scheme.equals("https", ignoreCase = true)
+    ) {
+        TargetUrlValueKind.HTTP_URL
+    } else {
+        TargetUrlValueKind.NON_HTTP_URL
+    }
+    return copy(
+        displayUrl = resolved.displayUrl,
+        host = resolved.host,
+        path = resolved.path,
+        pathMatchesSchoolPage = type.equals("page", true) && resolved.path == SCHOOL_PAGE_PATH,
+        schoolMatch = classifySchoolTarget(
+            resolved.host,
+            title,
+            type,
+            containerName,
+            kind
+        ),
+        urlSource = source
     )
 }
+
+private fun markLastAttemptFailure(attempts: MutableList<DevToolsSocketAttempt>, failure: String) {
+    val index = attempts.lastIndex
+    if (index >= 0) attempts[index] = attempts[index].copy(failure = failure, targetCount = null)
+}
+
+private fun result(
+    state: DevToolsDiscoveryState,
+    candidates: List<DevToolsSocketCandidate>,
+    attempts: List<DevToolsSocketAttempt>,
+    targets: List<DevToolsTarget>,
+    endpointUsed: DevToolsEndpoint?,
+    cdpFailure: DevToolsCdpFailure?
+): DevToolsTargetDiscoveryResult = DevToolsTargetDiscoveryResult(
+    finalState = state,
+    candidates = candidates,
+    attempts = attempts,
+    targets = targets.distinctBy { Triple(it.socketName, it.id, it.displayUrl) },
+    endpointUsed = endpointUsed,
+    cdpFailure = cdpFailure
+)
 
 private suspend fun requestFromSocket(
     client: LocalAdbClient,
@@ -173,12 +372,12 @@ private suspend fun requestFromSocket(
     } catch (exception: Exception) {
         onState(DevToolsDiscoveryState.DEVTOOLS_SOCKET_OPEN_FAILED)
         return SocketProbe(
-            endpoint = endpoint,
-            response = null,
-            attempt = DevToolsSocketAttempt(
-                socketName = candidate.socketName,
-                inode = candidate.inode,
-                endpointPath = endpoint.path,
+            endpoint,
+            null,
+            DevToolsSocketAttempt(
+                candidate.socketName,
+                candidate.inode,
+                endpoint.path,
                 opened = false,
                 httpStatus = null,
                 targetCount = null,
@@ -189,17 +388,16 @@ private suspend fun requestFromSocket(
 
     onState(DevToolsDiscoveryState.DEVTOOLS_SOCKET_OPEN_SUCCESS)
     onState(DevToolsDiscoveryState.DEVTOOLS_HTTP_START)
-    val readResult = readDevToolsHttpResponse(stream, endpoint)
-    return when (readResult) {
+    return when (val readResult = readDevToolsHttpResponse(stream, endpoint)) {
         is DevToolsHttpReadResult.Failed -> {
             onState(DevToolsDiscoveryState.DEVTOOLS_HTTP_FAILED)
             SocketProbe(
-                endpoint = endpoint,
-                response = null,
-                attempt = DevToolsSocketAttempt(
-                    socketName = candidate.socketName,
-                    inode = candidate.inode,
-                    endpointPath = endpoint.path,
+                endpoint,
+                null,
+                DevToolsSocketAttempt(
+                    candidate.socketName,
+                    candidate.inode,
+                    endpoint.path,
                     opened = true,
                     httpStatus = null,
                     targetCount = null,
@@ -214,16 +412,20 @@ private suspend fun requestFromSocket(
                 onState(DevToolsDiscoveryState.DEVTOOLS_HTTP_FAILED)
             }
             SocketProbe(
-                endpoint = endpoint,
-                response = readResult.response,
-                attempt = DevToolsSocketAttempt(
-                    socketName = candidate.socketName,
-                    inode = candidate.inode,
-                    endpointPath = endpoint.path,
+                endpoint,
+                readResult.response,
+                DevToolsSocketAttempt(
+                    candidate.socketName,
+                    candidate.inode,
+                    endpoint.path,
                     opened = true,
                     httpStatus = readResult.response.statusCode,
                     targetCount = null,
-                    failure = if (readResult.response.statusCode in 200..299) null else "HTTP_${readResult.response.statusCode}"
+                    failure = if (readResult.response.statusCode in 200..299) {
+                        null
+                    } else {
+                        "HTTP_" + readResult.response.statusCode
+                    }
                 )
             )
         }
@@ -235,5 +437,10 @@ private data class SocketProbe(
     val response: DevToolsHttpResponse?,
     val attempt: DevToolsSocketAttempt
 )
+
+private sealed interface ParseResponse {
+    data object Invalid : ParseResponse
+    data class Valid(val targets: List<ParsedDevToolsTarget>) : ParseResponse
+}
 
 private const val MAX_DEVTOOLS_SOCKET_CANDIDATES = 24
