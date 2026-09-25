@@ -18,6 +18,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.ADB_CONNECTED
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.ADB_CONNECTING
 import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState.ADB_CONNECTION_FAILED
@@ -44,6 +47,7 @@ import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -161,6 +165,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     val context = LocalContext.current.applicationContext
     val client = remember(context) { LocalAdbClient(context) }
     val operationScope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
     val colors = LocalAppColors.current
 
     var pairingPort by remember { mutableStateOf("") }
@@ -196,6 +201,18 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var cdpUrlComparison by remember { mutableStateOf<String?>(null) }
     var cdpFailureMessage by remember { mutableStateOf<String?>(null) }
     var cdpFinalState by remember { mutableStateOf<String?>(null) }
+    var appInForeground by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
+    var networkListenerJob by remember { mutableStateOf<Job?>(null) }
+    var networkSessionState by remember { mutableStateOf("NOT_RUN") }
+    var networkState by remember { mutableStateOf("NOT_RUN") }
+    var networkListenerState by remember { mutableStateOf("IDLE") }
+    var networkSchoolRequestCount by remember { mutableStateOf(0) }
+    var networkRequests by remember { mutableStateOf<List<CourseRequestSummary>>(emptyList()) }
+    var networkMainFrameUrl by remember { mutableStateOf<SanitizedTargetUrl?>(null) }
+    var networkFailureDetail by remember { mutableStateOf<String?>(null) }
+    var networkFinalState by remember { mutableStateOf<String?>(null) }
     var probePort by remember { mutableStateOf<Int?>(null) }
     var lastError by remember { mutableStateOf<String?>(null) }
 
@@ -217,6 +234,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
 
     DisposableEffect(client) {
         onDispose {
+            networkListenerJob?.cancel()
             val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             cleanupScope.launch {
                 try {
@@ -228,6 +246,18 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 }
             }
         }
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> appInForeground = true
+                Lifecycle.Event.ON_STOP -> appInForeground = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     fun pairWithWirelessDebuggingCode() {
@@ -591,6 +621,173 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 busy = false
             }
         }
+    }
+
+    fun stopCourseNetworkListener() {
+        val job = networkListenerJob ?: return
+        networkListenerState = "STOPPING"
+        job.cancel()
+    }
+
+    fun startCourseNetworkListener() {
+        if (networkListenerJob != null || busy) return
+        val port = connectPort.toIntOrNull()
+        if (port == null || port !in 1..65535) {
+            networkListenerState = "FAILED"
+            networkFailureDetail = "请输入 Wireless Debugging 主页面显示的有效连接端口。"
+            return
+        }
+        if (!uidVerified || idState != ID_EXECUTED || probePort != port) {
+            networkListenerState = "FAILED"
+            networkFailureDetail = "请先使用当前连接端口运行 id，并确认 UID 2000。"
+            return
+        }
+
+        val discovery = devToolsResult
+        val endpoint = discovery?.schoolCdpEndpoint
+        val target = endpoint?.let { selected ->
+            discovery.targets.firstOrNull {
+                it.id == selected.targetId &&
+                    it.socketName == selected.socketName &&
+                    it.title == SCHOOL_TITLE &&
+                    it.type.equals("page", ignoreCase = true) &&
+                    it.containerName == WEWORK_PACKAGE &&
+                    it.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND
+            }
+        }
+        if (discovery?.finalState != DevToolsDiscoveryState.SCHOOL_TARGET_FOUND || endpoint == null || target == null) {
+            networkListenerState = "FAILED"
+            networkFailureDetail = "请先完成 Phase 3 并确认“我的课表”学校 Target。"
+            return
+        }
+
+        networkSessionState = "CONNECTING"
+        networkState = "NOT_RUN"
+        networkListenerState = "CDP_CONNECT_START"
+        networkSchoolRequestCount = 0
+        networkRequests = emptyList()
+        networkMainFrameUrl = null
+        networkFailureDetail = null
+        networkFinalState = null
+        busy = true
+
+        lateinit var listenerJob: Job
+        listenerJob = operationScope.launch {
+            var openedStream: AdbStream? = null
+            var cdpClient: DevToolsCdpClient? = null
+            try {
+                connectionState = ADB_CONNECTING
+                if (!client.connect(port)) throw IOException("TLS connection was not established")
+                connectionState = ADB_CONNECTED
+                openedStream = client.openDevToolsSocket(endpoint.socketName)
+                when (val connected = DevToolsCdpClient.connect(openedStream, endpoint.rawWebSocketUrl)) {
+                    is DevToolsCdpConnectResult.Failed -> {
+                        networkSessionState = "FAILED"
+                        networkListenerState = connected.handshakeDiagnostic?.classificationLabel
+                            ?: connected.failure.name
+                        cdpHandshakeDiagnostic = connected.handshakeDiagnostic
+                        networkFailureDetail = connected.handshakeDiagnostic?.classificationLabel
+                            ?: connected.failure.name
+                    }
+                    is DevToolsCdpConnectResult.Connected -> {
+                        cdpClient = connected.client
+                        cdpHandshakeDiagnostic = connected.handshakeDiagnostic
+                        networkSessionState = "CONNECTED"
+                        networkListenerState = "PAGE_GET_FRAME_TREE_START"
+                        when (val frameTree = requestMainFrameUrl(connected.client)) {
+                            is CdpFrameTreeProbeResult.Success -> {
+                                networkMainFrameUrl = frameTree.mainFrameUrl
+                                val frame = frameTree.mainFrameUrl
+                                if (!frame.scheme.equals("https", ignoreCase = true) ||
+                                    !frame.host.equals(SCHOOL_HOST, ignoreCase = true)
+                                ) {
+                                    networkListenerState = "TARGET_NOT_SCHOOL_PAGE"
+                                    networkFailureDetail = "当前主 Frame 不在已确认的学校域名，未启用 Network。"
+                                } else {
+                                    val observer = CdpNetworkObserver(
+                                        client = connected.client,
+                                        onState = { state ->
+                                            if (state == CdpNetworkObserverState.CDP_DISCONNECTED) {
+                                                networkListenerState = when (classifyCdpDisconnect(appInForeground)) {
+                                                    CdpDisconnectContext.FOREGROUND -> "CDP_DISCONNECTED"
+                                                    CdpDisconnectContext.BACKGROUND -> "CDP_DISCONNECTED_WHILE_BACKGROUND"
+                                                }
+                                                networkState = "DISCONNECTED"
+                                            } else {
+                                                networkListenerState = state.name
+                                                if (state == CdpNetworkObserverState.NETWORK_ENABLED) {
+                                                    networkState = "ENABLED"
+                                                }
+                                            }
+                                            if (state == CdpNetworkObserverState.COURSE_JSON_CONFIRMED) {
+                                                networkFinalState = "PHASE5_NETWORK_CAPTURE_SUCCESS"
+                                                networkListenerJob?.cancel()
+                                            }
+                                        },
+                                        onSnapshot = { snapshot ->
+                                            networkSchoolRequestCount = snapshot.schoolRequestCount
+                                            networkRequests = snapshot.recentRequests
+                                            if (snapshot.recentRequests.any {
+                                                    it.bodyState == CourseBodyState.COURSE_JSON_CONFIRMED
+                                                }
+                                            ) {
+                                                networkFinalState = "PHASE5_NETWORK_CAPTURE_SUCCESS"
+                                                networkListenerJob?.cancel()
+                                            }
+                                        }
+                                    )
+                                    when (val result = observer.observe()) {
+                                        CdpNetworkObserverResult.Stopped -> Unit
+                                        is CdpNetworkObserverResult.Disconnected -> {
+                                            networkState = "DISCONNECTED"
+                                            networkFailureDetail = result.failure.name
+                                        }
+                                        is CdpNetworkObserverResult.NetworkEnableFailed -> {
+                                            networkState = "NETWORK_ENABLE_FAILED"
+                                            networkListenerState = "NETWORK_ENABLE_FAILED"
+                                            networkFailureDetail = buildString {
+                                                append(result.failure.name)
+                                                result.protocolCode?.let { append(" · code=").append(it) }
+                                                result.protocolMessage?.let { append(" · ").append(it) }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            is CdpFrameTreeProbeResult.CommandFailed -> {
+                                networkListenerState = "PAGE_GET_FRAME_TREE_FAILED"
+                                networkFailureDetail = buildString {
+                                    append(frameTree.failure.name)
+                                    frameTree.protocolCode?.let { append(" · code=").append(it) }
+                                    frameTree.protocolMessage?.let { append(" · ").append(it) }
+                                }
+                            }
+                            CdpFrameTreeProbeResult.MainFrameUrlMissing -> {
+                                networkListenerState = "TARGET_NOT_SCHOOL_PAGE"
+                                networkFailureDetail = "当前主 Frame URL 缺失，未启用 Network。"
+                            }
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                networkSessionState = "FAILED"
+                networkListenerState = if (networkListenerState == "CDP_CONNECT_START") {
+                    "CDP_CONNECT_FAILED"
+                } else {
+                    "NETWORK_LISTENER_FAILED"
+                }
+                networkFailureDetail = exception.javaClass.simpleName.ifBlank { "Exception" }
+            } finally {
+                runCatching { cdpClient?.close() }
+                if (cdpClient == null) runCatching { openedStream?.close() }
+                networkListenerJob = null
+                if (networkListenerState == "STOPPING") networkListenerState = "STOPPED"
+                busy = false
+            }
+        }
+        networkListenerJob = listenerJob
     }
 
     fun runExecutorProbe(command: LocalAdbReadOnlyCommand, summarize: (String) -> String?) {
@@ -1118,6 +1315,103 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     cdpUrlComparison?.let { Text("HTTP / CDP：$it", style = AppType.caption, color = if (it == "MATCH") colors.ink else colors.danger) }
                     cdpFailureMessage?.let { Text("诊断：$it", style = AppType.caption, color = colors.danger) }
                     cdpFinalState?.let { Text(it, style = AppType.body, color = if (it == "PHASE4_CDP_MINIMAL_SUCCESS") colors.ink else colors.danger) }
+                }
+            }
+        }
+
+        SectionLabel("Phase 5A · CDP Network 课表接口观察")
+        AppCard(Modifier.fillMaxWidth()) {
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+                Text(
+                    "只监听已确认的企业微信“我的课表”页面自身发出的请求。仅匹配学校域名与课表路径；不会读取请求头、Cookie、Storage、页面内容，也不会主动请求或刷新页面。响应正文只在内存中解析为课表摘要，不保存原文。",
+                    style = AppType.body,
+                    color = colors.ink
+                )
+                val networkEndpoint = devToolsResult?.schoolCdpEndpoint
+                val networkTarget = networkEndpoint?.let { endpoint ->
+                    devToolsResult?.targets?.firstOrNull {
+                        it.id == endpoint.targetId &&
+                            it.socketName == endpoint.socketName &&
+                            it.title == SCHOOL_TITLE &&
+                            it.type.equals("page", ignoreCase = true) &&
+                            it.containerName == WEWORK_PACKAGE &&
+                            it.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND
+                    }
+                }
+                if (networkTarget != null && devToolsResult?.finalState == DevToolsDiscoveryState.SCHOOL_TARGET_FOUND) {
+                    Text("Target：${networkTarget.title} · ${networkTarget.type} · ${networkTarget.containerName}", style = AppType.caption, color = colors.ink)
+                    Text("URL：${networkTarget.displayUrl}", style = AppType.caption, color = colors.mut)
+                    PillButton(
+                        if (networkListenerJob != null) "停止监听" else "开始监听",
+                        onClick = {
+                            if (networkListenerJob != null) stopCourseNetworkListener()
+                            else startCourseNetworkListener()
+                        },
+                        style = if (networkListenerJob != null) PillStyle.Secondary else PillStyle.Primary
+                    )
+                } else {
+                    Text(
+                        "先完成 Phase 3 并确认 SCHOOL_TARGET_FOUND；未确认学校 Target 前不会连接或启用 Network。",
+                        style = AppType.caption,
+                        color = colors.mut
+                    )
+                }
+
+                if (networkListenerState != "IDLE" || networkSessionState != "NOT_RUN") {
+                    Text("CDP：$networkSessionState", style = AppType.caption, color = colors.ink)
+                    Text("Network：$networkState", style = AppType.caption, color = colors.ink)
+                    Text("监听：$networkListenerState", style = AppType.caption, color = colors.ink)
+                    Text("学校域请求：$networkSchoolRequestCount", style = AppType.caption, color = colors.mut)
+                    networkMainFrameUrl?.let {
+                        Text("主 Frame：${it.displayUrl}", style = AppType.caption, color = colors.mut)
+                    }
+                    networkFailureDetail?.let {
+                        Text("诊断：$it", style = AppType.caption, color = colors.danger)
+                    }
+                    networkRequests.forEach { request ->
+                        SectionLabel("Request #${request.number}")
+                        Text("${request.method} ${request.host}${request.path}", style = AppType.caption, color = colors.ink)
+                        Text(
+                            "HTTP：${request.status ?: "等待响应"} · MIME：${request.mimeType ?: "未知"} · 类型：${request.resourceType ?: "未知"}",
+                            style = AppType.caption,
+                            color = colors.mut
+                        )
+                        Text("Body：${request.bodyState.name}", style = AppType.caption, color = if (
+                            request.bodyState in setOf(CourseBodyState.BODY_CDP_ERROR, CourseBodyState.BODY_NOT_JSON,
+                                CourseBodyState.BODY_DECODE_ERROR, CourseBodyState.BODY_NOT_AVAILABLE,
+                                CourseBodyState.BODY_REQUEST_ID_INVALID, CourseBodyState.HTTP_NOT_OK,
+                                CourseBodyState.REQUEST_FAILED, CourseBodyState.RESPONSE_MISSING,
+                                CourseBodyState.BODY_TOO_LARGE)
+                        ) colors.danger else colors.ink)
+                        request.cdpErrorCode?.let { code ->
+                            Text("CDP error：$code · ${request.cdpErrorMessage.orEmpty()}", style = AppType.caption, color = colors.danger)
+                        }
+                        request.payload?.let { payload ->
+                            Text(
+                                "JSON：${if (payload.isCourseSchedulePayload) "COURSE_JSON_CONFIRMED" else "未确认课表结构"}",
+                                style = AppType.caption,
+                                color = if (payload.isCourseSchedulePayload) colors.ink else colors.mut
+                            )
+                            Text(
+                                "学年：${payload.academicYear ?: "—"} · 学期：${payload.term ?: "—"} · 当前周：${payload.currentWeek ?: "—"} · 最大周：${payload.maximumWeek ?: "—"}",
+                                style = AppType.caption,
+                                color = colors.ink
+                            )
+                            Text(
+                                "日期：${payload.startDate ?: "—"} ~ ${payload.endDate ?: "—"} · 最大节次：${payload.maximumPeriod ?: "—"}",
+                                style = AppType.caption,
+                                color = colors.mut
+                            )
+                            Text(
+                                (1..7).joinToString(" · ") { week -> "week$week: ${payload.weekItemCounts[week] ?: 0}" },
+                                style = AppType.caption,
+                                color = colors.mut
+                            )
+                        }
+                    }
+                    networkFinalState?.let {
+                        Text(it, style = AppType.body, color = colors.ink)
+                    }
                 }
             }
         }

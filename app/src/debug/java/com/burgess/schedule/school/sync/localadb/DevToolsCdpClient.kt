@@ -11,17 +11,31 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.channels.Channel
 import org.json.JSONException
 import org.json.JSONObject
 
 internal enum class DevToolsCdpMethod(val protocolName: String) {
-    PAGE_GET_FRAME_TREE("Page.getFrameTree")
+    PAGE_GET_FRAME_TREE("Page.getFrameTree"),
+    NETWORK_ENABLE("Network.enable"),
+    NETWORK_GET_RESPONSE_BODY("Network.getResponseBody"),
+    NETWORK_DISABLE("Network.disable")
 }
 
 internal enum class DevToolsCdpFailure {
@@ -43,6 +57,7 @@ internal enum class DevToolsCdpFailure {
     IO_ERROR,
     INVALID_FRAME,
     MESSAGE_TOO_LARGE,
+    EVENT_BUFFER_OVERFLOW,
     INVALID_JSON,
     PROTOCOL_ERROR,
     URL_MISSING
@@ -136,6 +151,11 @@ internal interface DevToolsCdpCommandSession : Closeable {
     suspend fun sendCommand(method: DevToolsCdpMethod): DevToolsCdpCommandResult
 }
 
+internal interface DevToolsCdpNetworkSession : DevToolsCdpCommandSession {
+    suspend fun sendCommand(method: DevToolsCdpMethod, params: JSONObject?): DevToolsCdpCommandResult
+    suspend fun receiveNetworkEvent(): CdpNetworkEventReadResult
+}
+
 internal sealed interface CdpFrameTreeProbeResult {
     data class Success(val mainFrameUrl: SanitizedTargetUrl) : CdpFrameTreeProbeResult
     data class CommandFailed(
@@ -176,48 +196,114 @@ internal class DevToolsCdpClient private constructor(
     private val input: InputStream,
     private val output: OutputStream,
     initialBytes: ByteArray
-) : DevToolsCdpCommandSession {
+) : DevToolsCdpNetworkSession {
     private val bufferedInput = CdpByteQueue().apply { append(initialBytes) }
     private val nextCommandId = AtomicInteger(1)
+    private val pendingResponses = ConcurrentHashMap<Int, CompletableDeferred<DevToolsCdpCommandResult>>()
+    private val outputLock = Any()
+    private val closed = AtomicBoolean(false)
+    private val eventChannel = Channel<CdpNetworkEvent>(capacity = CDP_EVENT_BUFFER_CAPACITY)
+    private val readerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile private var terminalFailure: DevToolsCdpFailure? = null
+    private val readerJob: Job = readerScope.launch { readIncomingMessages() }
 
     override suspend fun sendCommand(method: DevToolsCdpMethod): DevToolsCdpCommandResult =
-        withContext(Dispatchers.IO) {
-            val commandId = nextCommandId.getAndIncrement()
-            val message = buildCdpCommandPayload(commandId, method)
-            try {
-                sendClientFrame(OPCODE_TEXT, message)
-                val response = withTimeoutOrNull(CDP_COMMAND_TIMEOUT_MS) {
-                    awaitResponse(commandId)
-                } ?: return@withContext DevToolsCdpCommandResult.Failed(DevToolsCdpFailure.TIMEOUT)
-                response
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (exception: CdpWireException) {
-                DevToolsCdpCommandResult.Failed(
-                    exception.failure,
-                    exception.protocolCode,
-                    exception.protocolMessage
-                )
-            } catch (_: IOException) {
-                DevToolsCdpCommandResult.Failed(DevToolsCdpFailure.IO_ERROR)
-            } catch (_: JSONException) {
-                DevToolsCdpCommandResult.Failed(DevToolsCdpFailure.INVALID_JSON)
-            }
-        }
+        sendCommand(method, params = null)
 
-    private suspend fun awaitResponse(commandId: Int): DevToolsCdpCommandResult {
-        while (true) {
-            val message = readTextMessage()
-            when (val parsed = parseCdpResponseMessage(message, commandId)) {
-                CdpResponseParseResult.Ignore -> continue
-                CdpResponseParseResult.Invalid -> throw CdpWireException(DevToolsCdpFailure.INVALID_JSON)
-                is CdpResponseParseResult.Error -> throw CdpWireException(
-                    failure = DevToolsCdpFailure.PROTOCOL_ERROR,
-                    protocolCode = parsed.code,
-                    protocolMessage = parsed.message
-                )
-                is CdpResponseParseResult.Success -> return DevToolsCdpCommandResult.Success(parsed.result)
+    override suspend fun sendCommand(
+        method: DevToolsCdpMethod,
+        params: JSONObject?
+    ): DevToolsCdpCommandResult = withContext(Dispatchers.IO) {
+        if (closed.get()) return@withContext DevToolsCdpCommandResult.Failed(DevToolsCdpFailure.STREAM_CLOSED)
+        val commandId = nextCommandId.getAndIncrement()
+        val response = CompletableDeferred<DevToolsCdpCommandResult>()
+        pendingResponses[commandId] = response
+        try {
+            sendClientFrame(OPCODE_TEXT, buildCdpCommandPayload(commandId, method, params))
+            withTimeoutOrNull(CDP_COMMAND_TIMEOUT_MS) { response.await() }
+                ?: DevToolsCdpCommandResult.Failed(DevToolsCdpFailure.TIMEOUT)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (exception: CdpWireException) {
+            DevToolsCdpCommandResult.Failed(
+                exception.failure,
+                exception.protocolCode,
+                exception.protocolMessage
+            )
+        } catch (_: IOException) {
+            DevToolsCdpCommandResult.Failed(DevToolsCdpFailure.IO_ERROR)
+        } catch (_: JSONException) {
+            DevToolsCdpCommandResult.Failed(DevToolsCdpFailure.INVALID_JSON)
+        } finally {
+            pendingResponses.remove(commandId, response)
+        }
+    }
+
+    override suspend fun receiveNetworkEvent(): CdpNetworkEventReadResult {
+        val received = eventChannel.receiveCatching()
+        val event = received.getOrNull()
+        return if (event != null) {
+            CdpNetworkEventReadResult.Event(event)
+        } else {
+            CdpNetworkEventReadResult.Closed(terminalFailure ?: DevToolsCdpFailure.STREAM_CLOSED)
+        }
+    }
+
+    private suspend fun readIncomingMessages() {
+        var failure = DevToolsCdpFailure.STREAM_CLOSED
+        try {
+            while (currentCoroutineContext().isActive && !closed.get()) {
+                val message = readTextMessage()
+                val json = try {
+                    JSONObject(message)
+                } catch (_: JSONException) {
+                    throw CdpWireException(DevToolsCdpFailure.INVALID_JSON)
+                } catch (_: RuntimeException) {
+                    throw CdpWireException(DevToolsCdpFailure.INVALID_JSON)
+                }
+                val responseId = (json.opt("id") as? Number)?.toInt()
+                if (responseId != null) {
+                    val deferred = pendingResponses[responseId] ?: continue
+                    when (val parsed = parseCdpResponseMessage(message, responseId)) {
+                        CdpResponseParseResult.Ignore,
+                        CdpResponseParseResult.Invalid -> deferred.complete(
+                            DevToolsCdpCommandResult.Failed(DevToolsCdpFailure.INVALID_JSON)
+                        )
+                        is CdpResponseParseResult.Error -> deferred.complete(
+                            DevToolsCdpCommandResult.Failed(
+                                DevToolsCdpFailure.PROTOCOL_ERROR,
+                                parsed.code,
+                                parsed.message
+                            )
+                        )
+                        is CdpResponseParseResult.Success -> deferred.complete(
+                            DevToolsCdpCommandResult.Success(parsed.result)
+                        )
+                    }
+                } else {
+                    parseCdpNetworkEvent(json)?.let { event ->
+                        if (!eventChannel.trySend(event).isSuccess) {
+                            throw CdpWireException(DevToolsCdpFailure.EVENT_BUFFER_OVERFLOW)
+                        }
+                    }
+                }
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (exception: CdpWireException) {
+            failure = exception.failure
+        } catch (_: IOException) {
+            failure = DevToolsCdpFailure.IO_ERROR
+        } catch (_: JSONException) {
+            failure = DevToolsCdpFailure.INVALID_JSON
+        } catch (_: RuntimeException) {
+            failure = DevToolsCdpFailure.INVALID_JSON
+        } finally {
+            terminalFailure = failure
+            pendingResponses.values.forEach { deferred ->
+                deferred.complete(DevToolsCdpCommandResult.Failed(failure))
+            }
+            eventChannel.close()
         }
     }
 
@@ -282,7 +368,7 @@ internal class DevToolsCdpClient private constructor(
         }
     }
 
-    private fun sendClientFrame(opcode: Int, payload: ByteArray) {
+    private fun sendClientFrame(opcode: Int, payload: ByteArray) = synchronized(outputLock) {
         if (payload.size > MAX_CDP_MESSAGE_BYTES) {
             throw CdpWireException(DevToolsCdpFailure.MESSAGE_TOO_LARGE)
         }
@@ -292,8 +378,15 @@ internal class DevToolsCdpClient private constructor(
     }
 
     override fun close() {
+        if (!closed.compareAndSet(false, true)) return
         runCatching { sendClientFrame(OPCODE_CLOSE, ByteArray(0)) }
         runCatching { stream.close() }
+        pendingResponses.values.forEach { deferred ->
+            deferred.complete(DevToolsCdpCommandResult.Failed(DevToolsCdpFailure.STREAM_CLOSED))
+        }
+        eventChannel.close()
+        readerJob.cancel()
+        readerScope.cancel()
     }
 
     override fun toString(): String = "DevToolsCdpClient(targetSocket=<redacted>)"
@@ -373,10 +466,15 @@ internal class DevToolsCdpClient private constructor(
     }
 }
 
-internal fun buildCdpCommandPayload(commandId: Int, method: DevToolsCdpMethod): ByteArray {
+internal fun buildCdpCommandPayload(
+    commandId: Int,
+    method: DevToolsCdpMethod,
+    params: JSONObject? = null
+): ByteArray {
     val payload = JSONObject()
         .put("id", commandId)
         .put("method", method.protocolName)
+    if (params != null) payload.put("params", params)
     return payload.toString().toByteArray(StandardCharsets.UTF_8)
 }
 
@@ -874,6 +972,7 @@ private const val MAX_CDP_MESSAGE_BYTES = 512 * 1024
 private const val CDP_READ_CHUNK_BYTES = 4 * 1024
 private const val CDP_CONNECT_TIMEOUT_MS = 5_000L
 private const val CDP_COMMAND_TIMEOUT_MS = 5_000L
+private const val CDP_EVENT_BUFFER_CAPACITY = 128
 private const val MAX_HANDSHAKE_BODY_SUMMARY_BYTES = 1_024
 private const val MAX_RESPONSE_REASON_CHARS = 120
 private const val MAX_PROTOCOL_ERROR_MESSAGE_CHARS = 160

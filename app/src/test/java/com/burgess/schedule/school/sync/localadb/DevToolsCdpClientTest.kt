@@ -20,6 +20,30 @@ class DevToolsCdpClientTest {
     }
 
     @Test
+    fun buildsOnlyTheApprovedNetworkCommandsAndBodyRequestId() {
+        val enable = JSONObject(String(buildCdpCommandPayload(2, DevToolsCdpMethod.NETWORK_ENABLE)))
+        val body = JSONObject(
+            String(
+                buildCdpCommandPayload(
+                    3,
+                    DevToolsCdpMethod.NETWORK_GET_RESPONSE_BODY,
+                    JSONObject().put("requestId", "request-3")
+                )
+            )
+        )
+        val disable = JSONObject(String(buildCdpCommandPayload(4, DevToolsCdpMethod.NETWORK_DISABLE)))
+
+        assertEquals("Network.enable", enable.getString("method"))
+        assertFalse(enable.has("params"))
+        assertEquals("Network.getResponseBody", body.getString("method"))
+        assertEquals("request-3", body.getJSONObject("params").getString("requestId"))
+        assertEquals("Network.disable", disable.getString("method"))
+        assertFalse(disable.has("params"))
+        assertFalse(body.toString().contains("Cookie"))
+        assertFalse(body.toString().contains("Authorization"))
+    }
+
+    @Test
     fun acceptsAValidWebSocketUpgradeHandshake() {
         val response = (
             "HTTP/1.1 101 Switching Protocols\r\n" +
