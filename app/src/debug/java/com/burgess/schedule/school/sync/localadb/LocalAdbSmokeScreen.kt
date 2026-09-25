@@ -92,6 +92,7 @@ internal data class LocalAdbUidCheckResult(
 )
 
 private const val MAX_ID_OUTPUT_CHARS = 1024
+private const val MAX_TARGETS_TO_DISPLAY = 32
 private val UID_NUMBER_PATTERN = Regex("(?:^|\\s)uid=(\\d+)\\b")
 private val COMPLETE_UID_FIELD_PATTERN = Regex("(?:^|\\s)uid=\\d+(?:\\([^)]+\\))?\\s")
 
@@ -182,6 +183,10 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var mapsScanMessage by remember { mutableStateOf<String?>(null) }
     var commandProbe by remember { mutableStateOf(CommandExecutorProbeResult()) }
     var commandProbeResults by remember { mutableStateOf<Map<LocalAdbCommandKind, CommandExecutorProbeResult>>(emptyMap()) }
+    var devToolsStateHistory by remember { mutableStateOf<List<DevToolsDiscoveryState>>(emptyList()) }
+    var devToolsResult by remember { mutableStateOf<DevToolsTargetDiscoveryResult?>(null) }
+    var devToolsMessage by remember { mutableStateOf<String?>(null) }
+    var devToolsProcessQueryStatus by remember { mutableStateOf("未查询") }
     var probePort by remember { mutableStateOf<Int?>(null) }
     var lastError by remember { mutableStateOf<String?>(null) }
 
@@ -233,6 +238,10 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         mapsScanResult = null
         mapsScanMessage = null
         commandProbeResults = emptyMap()
+        devToolsStateHistory = emptyList()
+        devToolsResult = null
+        devToolsMessage = null
+        devToolsProcessQueryStatus = "未查询"
         probePort = null
         busy = true
         operationScope.launch {
@@ -294,6 +303,10 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         socketScanMessage = null
         mapsScanResult = null
         mapsScanMessage = null
+        devToolsStateHistory = emptyList()
+        devToolsResult = null
+        devToolsMessage = null
+        devToolsProcessQueryStatus = "未查询"
         busy = true
         operationScope.launch {
             try {
@@ -349,6 +362,97 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     LocalAdbCommandKind.ID,
                     CommandExecutorProbeResult(CommandExecutorProbeState.FAILED, lastError.orEmpty())
                 )
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun discoverDevToolsTargets() {
+        if (busy) return
+        val port = connectPort.toIntOrNull()
+        if (port == null || port !in 1..65535) {
+            devToolsMessage = "请输入 Wireless Debugging 主页面显示的有效连接端口。"
+            return
+        }
+        if (!uidVerified || idState != ID_EXECUTED || probePort != port) {
+            devToolsMessage = "请先使用当前连接端口运行 id，并确认 UID 2000。"
+            return
+        }
+
+        devToolsStateHistory = emptyList()
+        devToolsResult = null
+        devToolsMessage = null
+        devToolsProcessQueryStatus = "未查询"
+        busy = true
+        operationScope.launch {
+            fun recordState(state: DevToolsDiscoveryState) {
+                devToolsStateHistory = devToolsStateHistory + state
+            }
+
+            try {
+                connectionState = ADB_CONNECTING
+                if (!client.connect(port)) throw IOException("TLS connection was not established")
+                connectionState = ADB_CONNECTED
+                recordState(DevToolsDiscoveryState.LOCAL_ADB_CONNECTED)
+
+                recordState(DevToolsDiscoveryState.DEVTOOLS_SOCKET_SCAN_START)
+                shellState = SHELL_OPENING
+                val unixOutput = client.executeReadOnly(LocalAdbReadOnlyCommand.PROC_UNIX_READ)
+                val unixResult = if (unixOutput.issue == LocalAdbReadIssue.NONE &&
+                    unixOutput.commandCompleted && unixOutput.exitCode == 0
+                ) {
+                    parseGlobalUnixSocketTable(unixOutput.output, unixOutput.exitCode)
+                } else {
+                    GlobalUnixSocketTableResult(ProcUnixScanState.PROC_UNIX_FAILED, null, emptyList())
+                }
+                if (unixResult.state != ProcUnixScanState.PROC_UNIX_SUCCESS) {
+                    recordState(DevToolsDiscoveryState.DEVTOOLS_SOCKET_SCAN_FAILED)
+                    shellState = SHELL_OPENED
+                    devToolsMessage = unixOutput.failureSummary
+                        ?: "读取 /proc/net/unix 失败；没有扫描任何 socket。"
+                    return@launch
+                }
+
+                val candidates = findDevToolsSocketCandidates(unixResult.sockets)
+                recordState(DevToolsDiscoveryState.DEVTOOLS_SOCKET_SCAN_SUCCESS)
+
+                val processOutput = client.executeReadOnly(LocalAdbReadOnlyCommand.PROCESS_QUERY)
+                val processResult = if (processOutput.issue == LocalAdbReadIssue.NONE &&
+                    processOutput.commandCompleted && processOutput.exitCode == 0
+                ) {
+                    parseProcessQuery(processOutput.output, processOutput.exitCode)
+                } else {
+                    ProcessQueryResult(ProcessQueryScanState.PROCESS_QUERY_FAILED, emptyList())
+                }
+                devToolsProcessQueryStatus = when (processResult.state) {
+                    ProcessQueryScanState.PROCESS_QUERY_SUCCESS -> "PROCESS_QUERY_SUCCESS · ${processResult.processes.size} 个企业微信进程"
+                    else -> "PROCESS_QUERY_FAILED · socket PID 无法关联进程"
+                }
+                shellState = SHELL_OPENED
+
+                devToolsResult = discoverDevToolsTargets(
+                    client = client,
+                    candidates = candidates,
+                    processes = processResult.processes,
+                    onState = ::recordState
+                )
+                devToolsMessage = when (devToolsResult?.finalState) {
+                    DevToolsDiscoveryState.SCHOOL_TARGET_FOUND -> "已发现山东商务职业学院教务系统 WebView。"
+                    DevToolsDiscoveryState.SCHOOL_HOST_TARGET_FOUND -> "发现学校域名页面，但标题不是“我的课表”。"
+                    DevToolsDiscoveryState.DEVTOOLS_CONNECTED_NO_SCHOOL_TARGET -> "DevTools HTTP 可用，尚未发现学校页面。"
+                    DevToolsDiscoveryState.DEVTOOLS_SOCKET_NOT_FOUND -> "/proc/net/unix 读取成功，但没有符合规则的 abstract DevTools socket。"
+                    DevToolsDiscoveryState.DEVTOOLS_SOCKET_OPEN_FAILED -> "发现候选 socket，但 localabstract 打开失败。查看各候选的安全错误类型。"
+                    DevToolsDiscoveryState.DEVTOOLS_HTTP_FAILED -> "socket 已打开，但 DevTools HTTP discovery 没有成功。查看 endpoint 和错误状态。"
+                    DevToolsDiscoveryState.TARGET_LIST_PARSE_FAILED -> "HTTP 返回成功，但 Target JSON 无法解析。"
+                    else -> null
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                if (connectionState == ADB_CONNECTING) connectionState = ADB_CONNECTION_FAILED
+                if (shellState == SHELL_OPENING) shellState = SHELL_FAILED
+                devToolsMessage = "${exception.javaClass.simpleName.ifBlank { "Exception" }}：Target discovery 未完成。"
             } finally {
                 busy = false
             }
@@ -616,7 +720,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         }
     }
 
-    SubPageScaffold("Local ADB / 全局 Socket 差分", onBack) {
+    SubPageScaffold("Local ADB / DevTools Target", onBack) {
         Text(
             "只连接本机 127.0.0.1。你需要在系统 Wireless Debugging 页面手动配对；本页不会打开或更改系统设置。",
             style = AppType.body,
@@ -678,6 +782,79 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             if (idOutput.isNotBlank()) {
                 SectionLabel("id 输出")
                 Text(idOutput, style = AppType.caption, color = colors.ink)
+            }
+        }
+
+        SectionLabel("Phase 3 · XWeb DevTools Target Discovery")
+        AppCard(Modifier.fillMaxWidth()) {
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+                Text(
+                    "扫描 /proc/net/unix 中的具名 abstract DevTools socket，再通过 localabstract 请求 /json/list；仅在该 endpoint 不受支持时尝试 /json。只显示 Target 的 id、type、title、脱敏 URL 和 socket 标识，不连接 WebSocket。",
+                    style = AppType.body,
+                    color = colors.ink
+                )
+                Text(
+                    "仅在你点击后运行。URL 不显示 query 或 fragment；不会读取页面正文、DOM、JavaScript、Cookie、Storage 或学校接口。",
+                    style = AppType.caption,
+                    color = colors.mut
+                )
+                PillButton(
+                    if (busy && devToolsStateHistory.lastOrNull() != null) "Target discovery 扫描中…" else "发现 DevTools Targets",
+                    onClick = ::discoverDevToolsTargets,
+                    style = PillStyle.Primary
+                )
+                Text(
+                    "ADB：${if (connectionState == ADB_CONNECTED) "LOCAL_ADB_CONNECTED" else connectionState.name}",
+                    style = AppType.caption,
+                    color = colors.ink
+                )
+                Text("进程关联：$devToolsProcessQueryStatus", style = AppType.caption, color = colors.mut)
+                devToolsStateHistory.takeLast(16).forEach { state ->
+                    Text(state.name, style = AppType.caption, color = colors.mut)
+                }
+                devToolsMessage?.let {
+                    val failedState = devToolsResult?.finalState?.let { state ->
+                        state == DevToolsDiscoveryState.DEVTOOLS_SOCKET_OPEN_FAILED ||
+                            state == DevToolsDiscoveryState.DEVTOOLS_HTTP_FAILED ||
+                            state == DevToolsDiscoveryState.TARGET_LIST_PARSE_FAILED
+                    } == true
+                    Text(it, style = AppType.caption, color = if (failedState || it.contains("失败")) colors.danger else colors.ink)
+                }
+                devToolsResult?.let { result ->
+                    Text(
+                        "结果：${result.finalState.name} · 候选 socket ${result.candidates.size} 个 · HTTP 请求 ${result.attempts.size} 次 · endpoint ${result.endpointUsed?.path ?: "无"}",
+                        style = AppType.caption,
+                        color = colors.ink
+                    )
+                    result.attempts.forEach { attempt ->
+                        Text(
+                            "${attempt.endpointPath} · ${attempt.socketName.take(160)} · inode=${attempt.inode} · opened=${attempt.opened} · HTTP=${attempt.httpStatus ?: "—"} · targets=${attempt.targetCount ?: "—"}${attempt.failure?.let { " · $it" }.orEmpty()}",
+                            style = AppType.caption,
+                            color = if (attempt.failure != null) colors.danger else colors.mut
+                        )
+                    }
+                    if (result.targets.isEmpty()) {
+                        Text("没有可显示的 Target。", style = AppType.caption, color = colors.mut)
+                    } else {
+                        result.targets.take(MAX_TARGETS_TO_DISPLAY).forEach { target ->
+                            SectionLabel("Target · ${target.type.ifBlank { "未知类型" }}")
+                            Text("进程/容器：${target.containerName ?: target.processName ?: "未按 PID 关联"}", style = AppType.caption, color = colors.ink)
+                            Text("标题：${target.title.ifBlank { "（空标题）" }}", style = AppType.caption, color = colors.ink)
+                            if (target.displayUrl.isNotBlank()) {
+                                Text("URL：${target.displayUrl}", style = AppType.caption, color = colors.ink)
+                            }
+                            Text("socket：${target.socketName.take(160)} · target id：${target.id.ifBlank { "（无）" }}", style = AppType.caption, color = colors.mut)
+                            Text(
+                                "学校匹配：${target.schoolMatch.name}${if (target.pathMatchesSchoolPage) " · path 匹配 /h5/index.html" else ""}",
+                                style = AppType.caption,
+                                color = if (target.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND) colors.ink else colors.mut
+                            )
+                        }
+                        if (result.targets.size > MAX_TARGETS_TO_DISPLAY) {
+                            Text("仅显示前 $MAX_TARGETS_TO_DISPLAY 个 Target。", style = AppType.caption, color = colors.mut)
+                        }
+                    }
+                }
             }
         }
 

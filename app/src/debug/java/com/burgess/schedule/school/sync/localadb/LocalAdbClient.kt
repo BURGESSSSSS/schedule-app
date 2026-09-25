@@ -62,6 +62,16 @@ internal class LocalAdbClient(context: Context) : Closeable {
         manager.isConnected || manager.connect(LOOPBACK, port)
     }
 
+    /** Opens one explicitly selected abstract socket for the Debug-only DevTools discovery probe. */
+    suspend fun openDevToolsSocket(socketName: String): AdbStream = withContext(Dispatchers.IO) {
+        require(socketName.startsWith('@')) { "Expected an abstract Unix socket name" }
+        val serviceName = socketName.removePrefix("@")
+        require(serviceName.isNotBlank() && serviceName.none { it.isWhitespace() || it == ':' || it == '@' || it.isISOControl() }) {
+            "Invalid abstract Unix socket name"
+        }
+        manager().openStream("localabstract:$serviceName")
+    }
+
     suspend fun executeReadOnly(command: LocalAdbReadOnlyCommand): LocalAdbCommandOutput =
         withContext(Dispatchers.IO) {
             var issue = LocalAdbReadIssue.NONE
