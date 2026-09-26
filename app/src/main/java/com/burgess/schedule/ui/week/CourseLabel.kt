@@ -6,11 +6,10 @@ fun shortName(name: String): String {
 
 /** Prefer the school's complete bracketed room/building description for week cells. */
 fun weekLocation(location: String): String {
-    val bracketed = Regex("""\[([^\[\]]*)\]""")
+    val bracketed = Regex("""\[([^\[\]]*)\]|【([^【】]*)】""")
         .findAll(location)
         .lastOrNull()
-        ?.groupValues
-        ?.getOrNull(1)
+        ?.let { match -> match.groups[1]?.value ?: match.groups[2]?.value }
         ?.trim()
         .orEmpty()
     return bracketed.ifBlank { location.trim() }

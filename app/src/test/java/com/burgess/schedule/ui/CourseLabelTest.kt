@@ -8,6 +8,8 @@ class CourseLabelTest {
   assertEquals("数智基地32-实训中心E303", weekLocation("实训中心E区[数智基地32-实训中心E303]"))
   assertEquals("二号教学楼B204", weekLocation("二号教学楼[二号教学楼B204]"))
   assertEquals("先进制造产教融合实训基地D202AI数据增值科创工坊2", weekLocation("先进制造产教融合实训基地[先进制造产教融合实训基地D202AI数据增值科创工坊2]"))
+  assertEquals("数智基地29-实训中心E209", weekLocation("实训中心E区【数智基地29-实训中心E209】"))
+  assertEquals("Room B204", weekLocation("Building [Room B204]"))
  }
  @Test fun weekLocationFallsBackToFullUnbracketedValue() {
   assertEquals("教学楼 AB-209", weekLocation("教学楼 AB-209"))

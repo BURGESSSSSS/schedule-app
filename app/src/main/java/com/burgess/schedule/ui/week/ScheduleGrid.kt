@@ -23,6 +23,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import com.burgess.schedule.BuildConfig
@@ -148,11 +149,13 @@ private fun CourseSlot(course: Course?, isFocus: Boolean, isInProgress: Boolean,
                 if (showPeriodRange) FittedWeekText(compactPeriodRangeLabel(course), AppType.micro, width - AppSpace.cellHorizontal * 2, foreground)
                 Text(
                     text = weekLocation(course.room).ifBlank { "未填写" },
-                    style = AppType.micro,
+                    style = AppType.micro.copy(
+                        fontSize = (AppType.micro.fontSize.value - 1f).coerceAtLeast(10f).sp,
+                        lineHeight = (AppType.micro.lineHeight.value - 2f).coerceAtLeast(12f).sp
+                    ),
                     color = foreground,
-                    maxLines = 2,
                     softWrap = true,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Clip
                 )
             } else if (editMode) {
                 Text("+", style = AppType.cardTitle, color = c.mut)
