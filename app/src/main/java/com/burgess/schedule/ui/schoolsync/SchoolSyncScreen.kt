@@ -8,12 +8,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -513,7 +510,7 @@ internal fun SchoolSyncScreen(
 
     SubPageScaffold("学校课表同步", onBack) {
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = AppSpace.page),
+            Modifier.fillMaxWidth().padding(bottom = AppSpace.page),
             verticalArrangement = Arrangement.spacedBy(AppSpace.gap)
         ) {
             Text("从企业微信教务系统读取你的学校课表并导入本地课程表。", style = AppType.body, color = colors.ink)
