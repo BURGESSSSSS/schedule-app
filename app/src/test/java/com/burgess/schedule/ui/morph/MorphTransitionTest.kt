@@ -42,6 +42,48 @@ class MorphMathTest {
         assertEquals(source, MorphMath.interpolateRect(source, target, 0f))
         assertEquals(target, MorphMath.interpolateRect(source, target, 1f))
     }
+
+    @Test fun morphMovementStartsImmediatelyAndDeceleratesWithoutOvershoot() {
+        val samples = (0..100).map { step ->
+            MorphMath.segmentGeometryProgress(step / 100f, 0f, 1f, 0f, 1f)
+        }
+        assertEquals(0f, samples.first(), 0f)
+        assertEquals(1f, samples.last(), 0f)
+        assertTrue(samples[10] > .1f)
+        assertTrue(samples[10] - samples[0] > samples[100] - samples[90])
+        assertTrue(samples.all { it in 0f..1f })
+    }
+
+    @Test fun closeAndMidAnimationReverseStartAtTheirCapturedVisualPosition() {
+        val openAtMid = MorphMath.segmentGeometryProgress(.42f, 0f, 1f, 0f, 1f)
+        val closeAtStart = MorphMath.segmentGeometryProgress(
+            value = .42f,
+            segmentStart = .42f,
+            segmentEnd = 0f,
+            visualStart = openAtMid,
+            visualEnd = 0f
+        )
+        assertEquals(openAtMid, closeAtStart, .0001f)
+
+        val laterClose = MorphMath.segmentGeometryProgress(
+            value = .18f,
+            segmentStart = .42f,
+            segmentEnd = 0f,
+            visualStart = openAtMid,
+            visualEnd = 0f
+        )
+        assertTrue(laterClose < closeAtStart)
+
+        val closeAtMid = MorphMath.segmentGeometryProgress(.5f, 1f, 0f, 1f, 0f)
+        val reverseAtStart = MorphMath.segmentGeometryProgress(
+            value = .5f,
+            segmentStart = .5f,
+            segmentEnd = 1f,
+            visualStart = closeAtMid,
+            visualEnd = 1f
+        )
+        assertEquals(closeAtMid, reverseAtStart, .0001f)
+    }
 }
 
 class MorphControllerTest {

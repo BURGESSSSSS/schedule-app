@@ -1,18 +1,40 @@
 package com.burgess.schedule.ui.morph
 
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.Easing
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import com.burgess.schedule.ui.theme.contrast
 
 /** Small, side-effect free functions used by the sandbox transition. */
 object MorphMath {
-    private val emphasizedDecelerate = CubicBezierEasing(.2f, 0f, 0f, 1f)
+    /** Fast out, slow in movement without an ease-in pause or overshoot. */
+    internal val movementEasing: Easing = CubicBezierEasing(0f, 0f, .2f, 1f)
 
     fun clampProgress(value: Float): Float = value.coerceIn(0f, 1f)
 
     /** The clock is linear; geometry alone uses this eased value. */
-    fun geometryProgress(value: Float): Float = emphasizedDecelerate.transform(clampProgress(value))
+    fun geometryProgress(value: Float): Float = movementEasing.transform(clampProgress(value))
+
+    /** Maps a linear animation segment to a visual segment while preserving
+     * continuity when an in-flight morph reverses direction. */
+    fun segmentGeometryProgress(
+        value: Float,
+        segmentStart: Float,
+        segmentEnd: Float,
+        visualStart: Float,
+        visualEnd: Float,
+        easing: Easing = movementEasing
+    ): Float {
+        val span = segmentEnd - segmentStart
+        val fraction = if (kotlin.math.abs(span) < 0.000001f) {
+            1f
+        } else {
+            ((value - segmentStart) / span).coerceIn(0f, 1f)
+        }
+        val eased = easing.transform(fraction)
+        return visualStart + (visualEnd - visualStart) * eased
+    }
 
     fun smoothStep(start: Float, end: Float, value: Float): Float {
         if (end <= start) return if (value < start) 0f else 1f
@@ -47,10 +69,10 @@ object MorphMath {
     }
 
     fun interpolate(start: Float, end: Float, value: Float): Float =
-        start + (end - start) * geometryProgress(value)
+        start + (end - start) * clampProgress(value)
 
     fun interpolateRect(source: Rect, target: Rect, value: Float): Rect {
-        val t = geometryProgress(value)
+        val t = clampProgress(value)
         fun mix(a: Float, b: Float) = a + (b - a) * t
         return Rect(mix(source.left, target.left), mix(source.top, target.top),
             mix(source.right, target.right), mix(source.bottom, target.bottom))

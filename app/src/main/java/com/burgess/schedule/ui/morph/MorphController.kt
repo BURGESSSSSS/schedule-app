@@ -1,6 +1,7 @@
 package com.burgess.schedule.ui.morph
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
@@ -35,6 +36,11 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
     private var hostOrigin by mutableStateOf(Offset.Zero)
     private var animationJob: Job? = null
     private var phase by mutableStateOf(Phase.Idle)
+    private var geometrySegmentStart = 0f
+    private var geometrySegmentEnd = 1f
+    private var geometryVisualStart = 0f
+    private var geometryVisualEnd = 1f
+    private var geometryEasing: Easing = LinearEasing
     private val sessionGate = MorphSessionGate()
     private var requestedAction: MorphExitAction? = null
     private var onExitFinished: (MorphExitAction) -> Unit = {}
@@ -46,7 +52,16 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
     private var debugStartProgress by mutableFloatStateOf(0f)
 
     val session: MorphSession? get() = sessionState.value
-    val debugProgress: Float get() = if (sessionState.value == null) debugStartProgress else progress.value
+    val debugProgress: Float get() = if (sessionState.value == null) debugStartProgress else visualProgress
+    internal val visualProgress: Float
+        get() = MorphMath.segmentGeometryProgress(
+            value = progress.value,
+            segmentStart = geometrySegmentStart,
+            segmentEnd = geometrySegmentEnd,
+            visualStart = geometryVisualStart,
+            visualEnd = geometryVisualEnd,
+            easing = geometryEasing
+        )
     internal val sourceRenderer: (@Composable MorphSourceContentScope.(Color?) -> Unit)? get() = sourceRenderState.value
 
     private enum class Phase { Idle, Opening, Expanded, BackGesture, Closing }
@@ -123,6 +138,11 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
         )
         val startProgress = debugStartProgress
         debugStartProgress = 0f
+        if (startProgress > 0f) {
+            configureGeometrySegment(startProgress, startProgress, startProgress, startProgress, LinearEasing)
+        } else {
+            configureGeometrySegment(0f, 1f, 0f, 1f, MorphMath.movementEasing)
+        }
         phase = Phase.Opening
         animationJob = scope.launch {
             if (startProgress > 0f) {
@@ -130,7 +150,7 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
                 phase = if (startProgress >= .999f) Phase.Expanded else Phase.Opening
             } else {
                 progress.snapTo(0f)
-                animateTo(1f, 400)
+                animateTo(1f, OPEN_DURATION_MS)
                 if (sessionState.value != null && phase == Phase.Opening) phase = Phase.Expanded
             }
         }
@@ -140,16 +160,26 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
     /** Close, edit and delete all share this path and are ignored while closing. */
     fun requestDismiss(action: MorphExitAction = MorphExitAction.Close) {
         if (sessionState.value == null || !sessionGate.beginExit(action)) return
+        val startProgress = progress.value
+        val startVisualProgress = visualProgress
         requestedAction = action
         animationJob?.cancel()
+        configureGeometrySegment(
+            segmentStart = startProgress,
+            segmentEnd = 0f,
+            visualStart = startVisualProgress,
+            visualEnd = 0f,
+            easing = MorphMath.movementEasing
+        )
         phase = Phase.Closing
         animationJob = scope.launch {
-            animateTo(0f, 340)
+            animateTo(0f, CLOSE_DURATION_MS)
             val completed = sessionGate.finishExit() ?: MorphExitAction.Close
             sessionState.value = null
             sourceRenderState.value = null
             requestedAction = null
             phase = Phase.Idle
+            configureGeometrySegment(0f, 1f, 0f, 1f, LinearEasing)
             animationJob = null
             onExitFinished(completed)
         }
@@ -161,6 +191,14 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
         animationJob?.cancel()
         animationJob = null
         backGestureStart = progress.value
+        val startVisualProgress = visualProgress
+        configureGeometrySegment(
+            segmentStart = backGestureStart,
+            segmentEnd = 0f,
+            visualStart = startVisualProgress,
+            visualEnd = 0f,
+            easing = LinearEasing
+        )
         phase = Phase.BackGesture
         return true
     }
@@ -187,8 +225,15 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
             return
         }
         phase = Phase.Opening
+        configureGeometrySegment(
+            segmentStart = progress.value,
+            segmentEnd = 1f,
+            visualStart = visualProgress,
+            visualEnd = 1f,
+            easing = MorphMath.movementEasing
+        )
         animationJob = scope.launch {
-            animateTo(1f, 400)
+            animateTo(1f, OPEN_DURATION_MS)
             if (sessionState.value != null && phase == Phase.Opening) phase = Phase.Expanded
             animationJob = null
         }
@@ -202,6 +247,7 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
         }
         if (phase == Phase.Closing) return
         animationJob?.cancel()
+        configureGeometrySegment(0f, 1f, 0f, 1f, LinearEasing)
         phase = if (value >= .999f) Phase.Expanded else Phase.Opening
         animationJob = scope.launch {
             progress.snapTo(value.coerceIn(0f, 1f))
@@ -213,6 +259,25 @@ class MorphController internal constructor(private val scope: CoroutineScope) {
         val duration = if (!animationsEnabled) 0 else (baseDuration / speed).toInt().coerceAtLeast(0)
         if (duration == 0) progress.snapTo(target)
         else progress.animateTo(target, tween(duration, easing = LinearEasing))
+    }
+
+    private fun configureGeometrySegment(
+        segmentStart: Float,
+        segmentEnd: Float,
+        visualStart: Float,
+        visualEnd: Float,
+        easing: Easing
+    ) {
+        geometrySegmentStart = segmentStart
+        geometrySegmentEnd = segmentEnd
+        geometryVisualStart = visualStart
+        geometryVisualEnd = visualEnd
+        geometryEasing = easing
+    }
+
+    private companion object {
+        const val OPEN_DURATION_MS = 300
+        const val CLOSE_DURATION_MS = 200
     }
 }
 

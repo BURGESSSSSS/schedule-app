@@ -117,7 +117,7 @@ fun MorphHost(
             Box(
                 Modifier.fillMaxSize().zIndex(20f).pointerInput(session.source.instanceKey) {
                     detectTapGestures { position ->
-                        val current = MorphMath.interpolateRect(session.source.bounds, target, controller.progress.value)
+                        val current = MorphMath.interpolateRect(session.source.bounds, target, controller.visualProgress)
                         if (!current.contains(position)) controller.requestDismiss()
                     }
                 }
@@ -162,8 +162,9 @@ private fun MorphOverlayLayout(
             Box(
                 Modifier.fillMaxSize().clearAndSetSemantics { hideFromAccessibility() }.graphicsLayer {
                     val p = controller.progress.value
-                    val current = MorphMath.interpolateRect(session.source.bounds, target, p)
-                    val fill = lerp(session.source.style.fill, colors.card, MorphMath.geometryProgress(p))
+                    val visualProgress = controller.visualProgress
+                    val current = MorphMath.interpolateRect(session.source.bounds, target, visualProgress)
+                    val fill = lerp(session.source.style.fill, colors.card, visualProgress)
                     val useFallback = MorphMath.useSourceInkFallback(fill, session.source.style.foreground, colors.ink)
                     translationX = current.left - session.source.bounds.left
                     translationY = current.top - session.source.bounds.top
@@ -181,8 +182,9 @@ private fun MorphOverlayLayout(
             Box(
                 Modifier.fillMaxSize().clearAndSetSemantics { hideFromAccessibility() }.graphicsLayer {
                     val p = controller.progress.value
-                    val current = MorphMath.interpolateRect(session.source.bounds, target, p)
-                    val fill = lerp(session.source.style.fill, colors.card, MorphMath.geometryProgress(p))
+                    val visualProgress = controller.visualProgress
+                    val current = MorphMath.interpolateRect(session.source.bounds, target, visualProgress)
+                    val fill = lerp(session.source.style.fill, colors.card, visualProgress)
                     val useFallback = MorphMath.useSourceInkFallback(fill, session.source.style.foreground, colors.ink)
                     translationX = current.left - session.source.bounds.left
                     translationY = current.top - session.source.bounds.top
@@ -202,8 +204,9 @@ private fun MorphOverlayLayout(
                     if (controller.detailsInteractive) Modifier else Modifier.clearAndSetSemantics { hideFromAccessibility() }
                 ).verticalScroll(detailScroll).graphicsLayer {
                     val p = controller.progress.value
-                    val current = MorphMath.interpolateRect(session.source.bounds, target, p)
-                    val fill = lerp(session.source.style.fill, colors.card, MorphMath.geometryProgress(p))
+                    val visualProgress = controller.visualProgress
+                    val current = MorphMath.interpolateRect(session.source.bounds, target, visualProgress)
+                    val fill = lerp(session.source.style.fill, colors.card, visualProgress)
                     val useOnInk = contrast(fill, colors.onInk) >= contrast(fill, colors.ink)
                     translationX = current.left - target.left
                     translationY = current.top - target.top
@@ -213,14 +216,14 @@ private fun MorphOverlayLayout(
             ) {
                 Box(Modifier.fillMaxWidth().wrapContentHeight()) {
                     Box(Modifier.fillMaxWidth().clearAndSetSemantics { hideFromAccessibility() }.graphicsLayer {
-                        val p = controller.progress.value
-                        val fill = lerp(session.source.style.fill, colors.card, MorphMath.geometryProgress(p))
+                        val visualProgress = controller.visualProgress
+                        val fill = lerp(session.source.style.fill, colors.card, visualProgress)
                         val useOnInk = contrast(fill, colors.onInk) >= contrast(fill, colors.ink)
                         alpha = if (useOnInk) 1f else 0f
                     }) { MorphDetailContent(session.details, colors, colors.onInk) }
                     Box(Modifier.fillMaxWidth().clearAndSetSemantics { hideFromAccessibility() }.graphicsLayer {
-                        val p = controller.progress.value
-                        val fill = lerp(session.source.style.fill, colors.card, MorphMath.geometryProgress(p))
+                        val visualProgress = controller.visualProgress
+                        val fill = lerp(session.source.style.fill, colors.card, visualProgress)
                         val useOnInk = contrast(fill, colors.onInk) >= contrast(fill, colors.ink)
                         alpha = if (useOnInk) 0f else 1f
                     }) { MorphDetailContent(session.details, colors, colors.ink) }
@@ -233,12 +236,13 @@ private fun MorphOverlayLayout(
         },
         modifier = Modifier.fillMaxSize().drawBehind {
             val p = controller.progress.value
-            val current = MorphMath.interpolateRect(session.source.bounds, target, p)
-            val radius = MorphMath.interpolate(session.source.style.cornerRadius.toPx(), 28.dp.toPx(), p)
+            val visualProgress = controller.visualProgress
+            val current = MorphMath.interpolateRect(session.source.bounds, target, visualProgress)
+            val radius = MorphMath.interpolate(session.source.style.cornerRadius.toPx(), 28.dp.toPx(), visualProgress)
             // Keep the source color long enough for white-on-black text to fade
             // before the light target background arrives. This avoids a black
             // card becoming a low-contrast empty shape at the hand-off.
-            val fillT = MorphMath.geometryProgress(p)
+            val fillT = visualProgress
             val fill = lerp(session.source.style.fill, colors.card, fillT)
             drawRoundRect(fill, current.topLeft, current.size, CornerRadius(radius, radius))
             if (session.source.style.outlineWidth > 0.dp) {
@@ -252,9 +256,9 @@ private fun MorphOverlayLayout(
             }
         }.drawWithContent {
             val contentScope = this
-            val p = controller.progress.value
-            val current = MorphMath.interpolateRect(session.source.bounds, target, p)
-            val radius = MorphMath.interpolate(session.source.style.cornerRadius.toPx(), 28.dp.toPx(), p)
+            val visualProgress = controller.visualProgress
+            val current = MorphMath.interpolateRect(session.source.bounds, target, visualProgress)
+            val radius = MorphMath.interpolate(session.source.style.cornerRadius.toPx(), 28.dp.toPx(), visualProgress)
             val path = Path().apply {
                 addRoundRect(RoundRect(current, CornerRadius(radius, radius)))
             }
@@ -309,8 +313,9 @@ private fun MorphTitleLayer(
         primaryColor: Boolean
     ): Modifier = Modifier.graphicsLayer {
         val p = controller.progress.value
+        val visualProgress = controller.visualProgress
         val titleGeometry = MorphMath.titleGeometryProgress(p)
-        val current = MorphMath.interpolateRect(session.source.bounds, target, p)
+        val current = MorphMath.interpolateRect(session.source.bounds, target, visualProgress)
         val targetYWithScroll = targetTitleTop + targetBaseline - detailScroll.value.toFloat()
         val sourceBaseline = sourceLocalY + sourceTitle.firstBaseline
         val targetBaselineLocal = targetYWithScroll
@@ -321,7 +326,7 @@ private fun MorphTitleLayer(
         translationY = current.top + desiredBaseline - baseline * scale - target.top
         scaleX = scale
         scaleY = scale
-        val fill = lerp(session.source.style.fill, colors.card, MorphMath.geometryProgress(p))
+        val fill = lerp(session.source.style.fill, colors.card, visualProgress)
         val useFallback = MorphMath.useSourceInkFallback(fill, session.source.style.foreground, colors.ink)
         val useOnInk = contrast(fill, colors.onInk) >= contrast(fill, colors.ink)
         val alpha = if (sourceFace) {
