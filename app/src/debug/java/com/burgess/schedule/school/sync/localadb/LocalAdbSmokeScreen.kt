@@ -553,7 +553,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
         if (discovery?.finalState != DevToolsDiscoveryState.SCHOOL_TARGET_FOUND || endpoint == null || target == null) {
-            cdpFailureMessage = "请先运行 Phase 3 并确认 SCHOOL_TARGET_FOUND；本按钮只连接该学校 Target。"
+            cdpFailureMessage = "请先确认已找到“我的课表”；本按钮只连接该课表页面。"
             cdpWebSocketState = "FAILED"
             return
         }
@@ -599,7 +599,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                                     cdpFinalState = "【需要总控判断】HTTP 与 CDP URL 不一致，已停止。"
                                 } else if (isSchoolMainFrameUrl(frameTree.mainFrameUrl)) {
                                     cdpCommandState = "SCHOOL_FRAME_CONFIRMED"
-                                    cdpFinalState = "PHASE4_CDP_MINIMAL_SUCCESS"
+                                    cdpFinalState = "CDP_READ_ONLY_PROBE_SUCCESS"
                                 } else {
                                     cdpFinalState = "主 frame URL 未匹配学校课表页面，已停止。"
                                 }
@@ -945,7 +945,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         }
         if (discovery?.finalState != DevToolsDiscoveryState.SCHOOL_TARGET_FOUND || endpoint == null || target == null) {
             networkListenerState = "FAILED"
-            networkFailureDetail = "请先完成 Phase 3 并确认“我的课表”学校 Target。"
+            networkFailureDetail = "请先确认已找到企业微信中的“我的课表”。"
             return
         }
 
@@ -1010,7 +1010,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                                                 }
                                             }
                                             if (state == CdpNetworkObserverState.COURSE_JSON_CONFIRMED) {
-                                                networkFinalState = "PHASE5_NETWORK_CAPTURE_SUCCESS"
+                                                networkFinalState = "NETWORK_OBSERVER_CAPTURE_SUCCESS"
                                                 networkListenerJob?.cancel()
                                             }
                                         },
@@ -1021,7 +1021,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                                                     it.bodyState == CourseBodyState.COURSE_JSON_CONFIRMED
                                                 }
                                             ) {
-                                                networkFinalState = "PHASE5_NETWORK_CAPTURE_SUCCESS"
+                                                networkFinalState = "NETWORK_OBSERVER_CAPTURE_SUCCESS"
                                                 networkListenerJob?.cancel()
                                             }
                                         }
@@ -1136,14 +1136,14 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         }
     }
 
-    SubPageScaffold("Local ADB / DevTools Target", onBack) {
+    SubPageScaffold("学校同步诊断", onBack) {
         Text(
             "只连接本机 127.0.0.1。你需要在系统 Wireless Debugging 页面手动配对；本页不会打开或更改系统设置。",
             style = AppType.body,
             color = colors.mut
         )
 
-        SectionLabel("步骤 1 · 配对")
+        SectionLabel("无线调试配对")
         AppCard(Modifier.fillMaxWidth()) {
             Text(
                 "在系统设置的 Wireless Debugging 页面选择“使用配对码配对”，将系统显示的配对端口和 6 位配对码填入这里。",
@@ -1175,7 +1175,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             Text("配对状态：${pairingState.name}", style = AppType.caption, color = colors.mut)
         }
 
-        SectionLabel("步骤 2 · TLS 连接与 UID 验证")
+        SectionLabel("连接与 UID 检查")
         AppCard(Modifier.fillMaxWidth()) {
             Text("回到 Wireless Debugging 主页面，填写当前显示的连接端口。连接后可运行 id 确认 UID。", style = AppType.body, color = colors.ink)
             OutlinedTextField(
@@ -1201,7 +1201,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
 
-        SectionLabel("Phase 3 · XWeb DevTools Target Discovery")
+        SectionLabel("课表页面目标诊断")
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
                 Text(
@@ -1334,11 +1334,11 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
 
-        SectionLabel("Phase 4 · XWeb DevTools 最小 CDP 会话")
+        SectionLabel("只读页面会话诊断")
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
                 Text(
-                    "只连接 Phase 3 已确认的“我的课表” Target，完成 WebSocket 握手后仅发送一次 Page.getFrameTree，再立即关闭 stream。不会读取 DOM、页面正文、Cookie、Storage 或学校接口。",
+                    "只连接已确认的“我的课表”页面，完成 WebSocket 握手后仅发送一次 Page.getFrameTree，再立即关闭连接。不会读取 DOM、页面正文、Cookie、Storage 或学校接口。",
                     style = AppType.body,
                     color = colors.ink
                 )
@@ -1366,7 +1366,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                         if (devToolsResult?.finalState == DevToolsDiscoveryState.SCHOOL_TARGET_FOUND) {
                             "学校 Target 已确认，但其 WebSocket 地址不可用；本轮无法建立 CDP 会话。"
                         } else {
-                            "先完成 Phase 3 并得到 SCHOOL_TARGET_FOUND；学校 Target 确认前不会显示连接按钮。"
+                            "先确认已找到企业微信中的“我的课表”；确认前不会显示连接按钮。"
                         },
                         style = AppType.caption,
                         color = colors.mut
@@ -1399,12 +1399,12 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     cdpMainFrameUrl?.let { Text("CDP main frame：${it.displayUrl}", style = AppType.caption, color = colors.ink) }
                     cdpUrlComparison?.let { Text("HTTP / CDP：$it", style = AppType.caption, color = if (it == "MATCH") colors.ink else colors.danger) }
                     cdpFailureMessage?.let { Text("诊断：$it", style = AppType.caption, color = colors.danger) }
-                    cdpFinalState?.let { Text(it, style = AppType.body, color = if (it == "PHASE4_CDP_MINIMAL_SUCCESS") colors.ink else colors.danger) }
+                    cdpFinalState?.let { Text(it, style = AppType.body, color = if (it == "CDP_READ_ONLY_PROBE_SUCCESS") colors.ink else colors.danger) }
                 }
             }
         }
 
-        SectionLabel("Phase 5A · CDP Network 课表接口观察")
+        SectionLabel("课程请求观察诊断")
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
                 Text(
@@ -1436,7 +1436,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     )
                 } else {
                     Text(
-                        "先完成 Phase 3 并确认 SCHOOL_TARGET_FOUND；未确认学校 Target 前不会连接或启用 Network。",
+                        "先确认已找到企业微信中的“我的课表”；未确认前不会连接或开始观察。",
                         style = AppType.caption,
                         color = colors.mut
                     )
@@ -1523,7 +1523,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
 
-        SectionLabel("Phase 6B · 整学期多周采集")
+        SectionLabel("整学期采集诊断")
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
                 Text(
@@ -1811,7 +1811,7 @@ private fun SchoolImportPreviewPanel(
     preview: SchoolImportPreview
 ) {
     val colors = LocalAppColors.current
-    SectionLabel("Phase 6A · Dry Run")
+    SectionLabel("整学期课程预览诊断")
     Text("SCHEDULE_PARSE_SUCCESS · SNAPSHOT_PREVIEW_READY", style = AppType.caption, color = colors.ink)
     Text("来源：山东商务职业学院", style = AppType.body, color = colors.ink)
     Text(
@@ -1882,7 +1882,7 @@ private fun SchoolImportPlanPanel(
     onConfirm: () -> Unit
 ) {
     val colors = LocalAppColors.current
-    SectionLabel("Phase 6C · 正式导入计划")
+    SectionLabel("数据库导入计划诊断")
     AppCard(Modifier.fillMaxWidth()) {
         Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
             Text(

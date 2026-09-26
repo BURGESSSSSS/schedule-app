@@ -556,7 +556,7 @@ internal fun SchoolSyncScreen(
             SectionLabel("打开企业微信课表")
             AppCard(Modifier.fillMaxWidth()) {
                 Text("企业微信课表：${if (discoveredSchoolPage) "已找到" else "等待打开"}", style = AppType.body, color = colors.ink)
-                Text("首次使用需在企业微信中开启 XWeb 调试，然后打开“工作台 → 教务系统 → 我的课表”。", style = AppType.caption, color = colors.mut)
+                Text("首次使用时，请在企业微信中打开此处复制的地址，确认执行成功后，再进入“工作台 → 教务系统 → 我的课表”。", style = AppType.caption, color = colors.mut)
                 PillButton("复制调试地址", ::copyInspectorAddress, PillStyle.Secondary, small = true)
                 if (uidVerified) {
                     PillButton(if (busy && operation == "detect") "正在检测…" else "检测课表页面", ::detectSchoolPage)
