@@ -11,7 +11,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class CdpMinimalPhase4Test {
+class CdpReadOnlyProbeTest {
     @Test
     fun handshakeUsesOnlyLocalHostAndWebSocketPathWithoutOriginOrQuery() {
         val uri = URI("ws://127.0.0.1:9222/devtools/page/target-id?secret=hidden")
@@ -166,7 +166,7 @@ class CdpMinimalPhase4Test {
     }
 
     @Test
-    fun phaseFourProbeSendsOnlyGetFrameTreeAndNormalizesTheMainFrameUrl() = runBlocking {
+    fun readOnlyProbeSendsOnlyGetFrameTreeAndNormalizesTheMainFrameUrl() = runBlocking {
         val session = FakeSession(
             DevToolsCdpCommandResult.Success(
                 JSONObject("""{"frameTree":{"frame":{"id":"main","url":"https://testjwgl.sdbi.edu.cn/h5/index.html?ticket=private"}}}""")

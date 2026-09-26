@@ -9,7 +9,7 @@ import org.junit.Test
 
 class DevToolsCdpClientTest {
     @Test
-    fun buildsOnlyThePhaseFourReadOnlyCommand() {
+    fun buildsOnlyTheReadOnlyFrameTreeCommand() {
         val frameTree = String(buildCdpCommandPayload(1, DevToolsCdpMethod.PAGE_GET_FRAME_TREE))
 
         assertEquals(1, JSONObject(frameTree).getInt("id"))

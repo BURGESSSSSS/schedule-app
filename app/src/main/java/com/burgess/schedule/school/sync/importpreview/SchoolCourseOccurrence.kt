@@ -1,6 +1,6 @@
 package com.burgess.schedule.school.sync.importpreview
 
-/** Phase 6C's database-sized unit: one concrete course meeting in one teaching week. */
+/** Database-sized unit: one concrete course meeting in one teaching week. */
 internal data class SchoolCourseOccurrence(
     val academicYear: String,
     val semesterFlag: String,

@@ -32,7 +32,7 @@ internal data class DevToolsTargetDiscoveryResult(
     val endpointUsed: DevToolsEndpoint?,
     val cdpFailure: DevToolsCdpFailure? = null,
     val cdpHandshakeDiagnostic: DevToolsHandshakeDiagnostic? = null,
-    /** Retained only in memory so Phase 4 can connect to the already-confirmed school target. */
+    /** Retained only in memory so the read-only probe can connect to the confirmed school target. */
     val schoolCdpEndpoint: DevToolsCdpEndpoint? = null
 )
 
@@ -231,7 +231,7 @@ internal suspend fun discoverDevToolsTargets(
             is DevToolsCdpConnectResult.Connected -> {
                 cdpHandshakeDiagnostic = connected.handshakeDiagnostic
                 onState(DevToolsDiscoveryState.CDP_CONNECT_SUCCESS)
-                // Phase 3.2 diagnoses the handshake only; it must not send a CDP method.
+                // Handshake diagnostics must not send a CDP method.
                 connected.client.close()
             }
         }

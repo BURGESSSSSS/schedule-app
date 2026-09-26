@@ -104,7 +104,7 @@ private fun safeFailure(error: Exception, secret: String? = null): String {
 }
 
 @Composable
-internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
+internal fun SchoolSyncDiagnosticsContent(onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current.applicationContext
     val client = remember(context) { LocalAdbClient(context) }
@@ -1342,8 +1342,8 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     style = AppType.body,
                     color = colors.ink
                 )
-                val phase4Endpoint = devToolsResult?.schoolCdpEndpoint
-                val phase4Target = phase4Endpoint?.let { endpoint ->
+                val cdpEndpoint = devToolsResult?.schoolCdpEndpoint
+                val schoolTarget = cdpEndpoint?.let { endpoint ->
                     devToolsResult?.targets?.firstOrNull {
                         it.id == endpoint.targetId &&
                             it.socketName == endpoint.socketName &&
@@ -1353,9 +1353,9 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                             it.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND
                     }
                 }
-                if (phase4Target != null && devToolsResult?.finalState == DevToolsDiscoveryState.SCHOOL_TARGET_FOUND) {
-                    Text("Target：${phase4Target.title} · ${phase4Target.type} · ${phase4Target.containerName}", style = AppType.caption, color = colors.ink)
-                    Text("Socket：${phase4Target.socketName} · target id：${phase4Target.id}", style = AppType.caption, color = colors.mut)
+                if (schoolTarget != null && devToolsResult?.finalState == DevToolsDiscoveryState.SCHOOL_TARGET_FOUND) {
+                    Text("Target：${schoolTarget.title} · ${schoolTarget.type} · ${schoolTarget.containerName}", style = AppType.caption, color = colors.ink)
+                    Text("Socket：${schoolTarget.socketName} · target id：${schoolTarget.id}", style = AppType.caption, color = colors.mut)
                     PillButton(
                         if (busy && cdpWebSocketState == "CONNECTING") "CDP 连接中…" else "验证 CDP 最小连接",
                         onClick = ::verifyCdpMinimalConnection,

@@ -166,7 +166,7 @@ internal sealed interface CdpFrameTreeProbeResult {
     data object MainFrameUrlMissing : CdpFrameTreeProbeResult
 }
 
-/** Phase 4 deliberately sends one command and never falls back to another CDP method. */
+/** The read-only probe sends one command and never falls back to another CDP method. */
 internal suspend fun requestMainFrameUrl(session: DevToolsCdpCommandSession): CdpFrameTreeProbeResult =
     when (val response = session.sendCommand(DevToolsCdpMethod.PAGE_GET_FRAME_TREE)) {
         is DevToolsCdpCommandResult.Failed -> CdpFrameTreeProbeResult.CommandFailed(
