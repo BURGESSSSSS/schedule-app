@@ -9,6 +9,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,15 +48,31 @@ import com.burgess.schedule.school.sync.importpreview.SchoolImportMapper
 import com.burgess.schedule.school.sync.importpreview.SchoolImportPreview
 import com.burgess.schedule.school.sync.importpreview.SchoolImportPreviewSummary
 import com.burgess.schedule.school.sync.importpreview.SchoolParseWarning
+import com.burgess.schedule.school.sync.importpreview.MergedSemesterSchedule
+import com.burgess.schedule.school.sync.importpreview.SemesterCollectionSession
+import com.burgess.schedule.school.sync.importpreview.SemesterCollectionState
+import com.burgess.schedule.school.sync.importpreview.SemesterCollectionStore
+import com.burgess.schedule.school.sync.importpreview.SemesterCollectionWarning
+import com.burgess.schedule.school.sync.importpreview.SemesterRuleCoverageWarning
+import com.burgess.schedule.school.sync.importpreview.SemesterSessionLoadResult
+import com.burgess.schedule.school.sync.importpreview.SemesterSnapshotCaptureResult
+import com.burgess.schedule.school.sync.importpreview.formatWeekSet
+import com.burgess.schedule.school.sync.importpreview.mergeSemesterSession
+import com.burgess.schedule.school.sync.importpreview.recordSnapshot
 import io.github.muntashirakon.adb.AdbStream
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 internal enum class LocalAdbCheckState {
     NOT_RUN,
@@ -169,6 +186,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current.applicationContext
     val client = remember(context) { LocalAdbClient(context) }
+    val semesterStore = remember(context) { SemesterCollectionStore(context) }
     val operationScope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
     val colors = LocalAppColors.current
@@ -220,8 +238,50 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var networkMainFrameUrl by remember { mutableStateOf<SanitizedTargetUrl?>(null) }
     var networkFailureDetail by remember { mutableStateOf<String?>(null) }
     var networkFinalState by remember { mutableStateOf<String?>(null) }
+    var semesterSession by remember { mutableStateOf<SemesterCollectionSession?>(null) }
+    var semesterSessionStoreReady by remember { mutableStateOf(false) }
+    var semesterSessionStoreError by remember { mutableStateOf<String?>(null) }
+    var semesterCollectionJob by remember { mutableStateOf<Job?>(null) }
+    var semesterCaptureProcessorJob by remember { mutableStateOf<Job?>(null) }
+    var semesterCaptureChannel by remember { mutableStateOf<Channel<CourseCaptureSnapshot>?>(null) }
+    var semesterListenerState by remember { mutableStateOf("IDLE") }
+    var semesterListenerError by remember { mutableStateOf<String?>(null) }
+    var semesterPreview by remember { mutableStateOf<MergedSemesterSchedule?>(null) }
+    val semesterStoreMutex = remember(semesterStore) { Mutex() }
     var probePort by remember { mutableStateOf<Int?>(null) }
     var lastError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(semesterStore) {
+        when (val loaded = semesterStore.load()) {
+            SemesterSessionLoadResult.Empty -> Unit
+            is SemesterSessionLoadResult.Invalid -> {
+                semesterSessionStoreError = "临时会话无法读取（${loaded.errorType}）；没有自动删除文件。"
+            }
+            is SemesterSessionLoadResult.Loaded -> {
+                semesterSession = loaded.session
+                if (loaded.session.sessionState == SemesterCollectionState.CDP_SESSION_LOST) {
+                    semesterListenerState = "CDP_SESSION_LOST"
+                }
+            }
+        }
+        semesterSessionStoreReady = true
+    }
+
+    suspend fun persistSemesterSession(session: SemesterCollectionSession) {
+        semesterStoreMutex.withLock {
+            withContext(Dispatchers.IO) { semesterStore.save(session) }
+        }
+    }
+
+    suspend fun persistSemesterSessionSafely(session: SemesterCollectionSession) {
+        try {
+            persistSemesterSession(session)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (exception: Exception) {
+            semesterSessionStoreError = exception.javaClass.simpleName.ifBlank { "IOException" }
+        }
+    }
 
     fun recordCommandProbe(kind: LocalAdbCommandKind, result: CommandExecutorProbeResult) {
         commandProbe = result
@@ -242,9 +302,13 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     DisposableEffect(client) {
         onDispose {
             networkListenerJob?.cancel()
+            semesterCollectionJob?.cancel()
+            semesterCaptureChannel?.close()
             val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             cleanupScope.launch {
                 try {
+                    semesterCollectionJob?.join()
+                    semesterCaptureProcessorJob?.join()
                     client.close()
                 } catch (_: Exception) {
                     // The one-shot PoC has no background connection after the page is closed.
@@ -636,8 +700,277 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         job.cancel()
     }
 
+    fun stopSemesterCollection() {
+        val job = semesterCollectionJob ?: return
+        semesterListenerState = "STOPPING"
+        semesterSession = semesterSession?.withState(SemesterCollectionState.SEMESTER_COLLECTION_STOPPED)
+        job.cancel()
+        operationScope.launch {
+            job.join()
+            semesterCaptureProcessorJob?.join()
+            semesterSession?.let { session -> persistSemesterSessionSafely(session) }
+            semesterListenerState = if (semesterSession?.coverageComplete == true) {
+                "SEMESTER_COVERAGE_COMPLETE"
+            } else {
+                "SEMESTER_COLLECTION_STOPPED"
+            }
+        }
+    }
+
+    fun startSemesterCollection() {
+        if (!semesterSessionStoreReady) {
+            semesterListenerError = "临时会话状态仍在读取，请稍后再试。"
+            return
+        }
+        if (semesterCollectionJob != null || networkListenerJob != null || busy) {
+            semesterListenerError = "请先停止当前监听或操作。"
+            return
+        }
+        val port = connectPort.toIntOrNull()
+        if (port == null || port !in 1..65535) {
+            semesterListenerError = "请输入 Wireless Debugging 主页面显示的有效连接端口。"
+            semesterListenerState = "FAILED"
+            return
+        }
+        if (!uidVerified || idState != ID_EXECUTED || probePort != port) {
+            semesterListenerError = "请先用当前连接端口运行 id，并确认 UID 2000。"
+            semesterListenerState = "FAILED"
+            return
+        }
+
+        val discovery = devToolsResult
+        val endpoint = discovery?.schoolCdpEndpoint
+        val target = endpoint?.let { selected ->
+            discovery.targets.firstOrNull {
+                it.id == selected.targetId &&
+                    it.socketName == selected.socketName &&
+                    it.title == SCHOOL_TITLE &&
+                    it.type.equals("page", ignoreCase = true) &&
+                    it.containerName == WEWORK_PACKAGE &&
+                    it.schoolMatch == SchoolTargetMatch.SCHOOL_TARGET_FOUND
+            }
+        }
+        if (discovery?.finalState != DevToolsDiscoveryState.SCHOOL_TARGET_FOUND || endpoint == null || target == null) {
+            semesterListenerState = "TARGET_NOT_CONFIRMED"
+            semesterListenerError = "先重新发现并确认“我的课表”学校 Target，再开始或继续采集。"
+            return
+        }
+
+        val session = (semesterSession ?: SemesterCollectionSession.start())
+            .withState(SemesterCollectionState.SEMESTER_COLLECTION_RUNNING)
+        semesterSession = session
+        semesterPreview = null
+        semesterListenerError = null
+        semesterSessionStoreError = null
+        semesterListenerState = "CDP_CONNECT_START"
+        networkState = "NOT_RUN"
+        networkMainFrameUrl = null
+        busy = true
+
+        lateinit var collectionJob: Job
+        collectionJob = operationScope.launch {
+            val captureChannel = Channel<CourseCaptureSnapshot>(Channel.UNLIMITED)
+            val handledRequestIds = linkedSetOf<String>()
+            var processorJob: Job? = null
+            var openedStream: AdbStream? = null
+            var cdpClient: DevToolsCdpClient? = null
+            var observerStarted = false
+            try {
+                persistSemesterSession(session)
+                processorJob = operationScope.launch {
+                    for (captureSnapshot in captureChannel) {
+                        networkSchoolRequestCount = captureSnapshot.schoolRequestCount
+                        networkRequests = captureSnapshot.recentRequests
+                        val confirmed = captureSnapshot.recentRequests.filter {
+                            it.bodyState == CourseBodyState.COURSE_JSON_CONFIRMED && it.scheduleSnapshot != null
+                        }
+                        confirmed.forEach { request ->
+                            if (!handledRequestIds.add(request.requestId)) return@forEach
+                            val sourceSnapshot = request.scheduleSnapshot ?: return@forEach
+                            val current = semesterSession ?: return@forEach
+                            val outcome = current.recordSnapshot(sourceSnapshot)
+                            when (outcome) {
+                                is SemesterSnapshotCaptureResult.Accepted -> {
+                                    var updated = outcome.session
+                                    if (!appInForeground) updated = updated.markBackgroundCdpSurvived()
+                                    semesterSession = updated
+                                    semesterPreview = null
+                                    semesterListenerState = when {
+                                        updated.coverageComplete -> "SEMESTER_COVERAGE_COMPLETE"
+                                        !appInForeground -> "BACKGROUND_CDP_SURVIVED"
+                                        outcome.replacedExistingWeek -> "WEEK_${outcome.week}_RECAPTURED"
+                                        else -> "WEEK_${outcome.week}_CAPTURED"
+                                    }
+                                    semesterListenerError = null
+                                    persistSemesterSessionSafely(updated)
+                                }
+                                is SemesterSnapshotCaptureResult.Rejected -> {
+                                    semesterSession = outcome.session
+                                    semesterListenerState = outcome.warning.name
+                                    semesterListenerError = when (outcome.warning) {
+                                        SemesterCollectionWarning.SEMESTER_METADATA_MISMATCH ->
+                                            "此响应的学年或学期标识与当前 Session 不同，已排除。"
+                                        SemesterCollectionWarning.MAX_WEEK_MISMATCH ->
+                                            "此响应的 maxzc 与 Session 基准不同，已排除并保留警告。"
+                                        SemesterCollectionWarning.INVALID_CAPTURE_WEEK ->
+                                            "此响应的 zc 或 maxzc 无效，未计入覆盖。"
+                                        SemesterCollectionWarning.INVALID_SEMESTER_METADATA ->
+                                            "此响应缺少学年或学期标识，未计入覆盖。"
+                                        SemesterCollectionWarning.CDP_SESSION_LOST ->
+                                            "CDP 连接已断开。"
+                                    }
+                                    persistSemesterSessionSafely(outcome.session)
+                                }
+                            }
+                        }
+                    }
+                }
+                semesterCaptureChannel = captureChannel
+                semesterCaptureProcessorJob = processorJob
+
+                connectionState = ADB_CONNECTING
+                if (!client.connect(port)) throw IOException("TLS connection was not established")
+                connectionState = ADB_CONNECTED
+                openedStream = client.openDevToolsSocket(endpoint.socketName)
+                when (val connected = DevToolsCdpClient.connect(openedStream, endpoint.rawWebSocketUrl)) {
+                    is DevToolsCdpConnectResult.Failed -> {
+                        semesterListenerState = connected.handshakeDiagnostic?.classificationLabel
+                            ?: connected.failure.name
+                        semesterListenerError = connected.handshakeDiagnostic?.classificationLabel
+                            ?: connected.failure.name
+                        semesterSession = semesterSession?.markCdpDisconnected()
+                    }
+                    is DevToolsCdpConnectResult.Connected -> {
+                        cdpClient = connected.client
+                        semesterListenerState = "CDP_CONNECT_SUCCESS"
+                        when (val frameTree = requestMainFrameUrl(connected.client)) {
+                            is CdpFrameTreeProbeResult.Success -> {
+                                networkMainFrameUrl = frameTree.mainFrameUrl
+                                val frame = frameTree.mainFrameUrl
+                                if (!frame.scheme.equals("https", ignoreCase = true) ||
+                                    !frame.host.equals(SCHOOL_HOST, ignoreCase = true)
+                                ) {
+                                    semesterListenerState = "TARGET_NOT_SCHOOL_PAGE"
+                                    semesterListenerError = "主 Frame 不匹配已确认的学校域名，未启用 Network。"
+                                } else {
+                                    observerStarted = true
+                                    val observer = CdpNetworkObserver(
+                                        client = connected.client,
+                                        onState = { state ->
+                                            if (state == CdpNetworkObserverState.CDP_DISCONNECTED) {
+                                                semesterListenerState = if (appInForeground) {
+                                                    "CDP_SESSION_LOST"
+                                                } else {
+                                                    "CDP_SESSION_LOST_WHILE_BACKGROUND"
+                                                }
+                                            } else {
+                                                semesterListenerState = state.name
+                                                if (state == CdpNetworkObserverState.NETWORK_ENABLED) {
+                                                    networkState = "ENABLED"
+                                                }
+                                            }
+                                        },
+                                        onSnapshot = { captureSnapshot ->
+                                            captureChannel.trySend(captureSnapshot)
+                                        }
+                                    )
+                                    when (val result = observer.observe()) {
+                                        CdpNetworkObserverResult.Stopped -> Unit
+                                        is CdpNetworkObserverResult.Disconnected -> {
+                                            networkState = "DISCONNECTED"
+                                            val lost = semesterSession?.markCdpDisconnected()
+                                            if (lost != null) {
+                                                semesterSession = lost
+                                                persistSemesterSessionSafely(lost)
+                                            }
+                                            semesterListenerError = result.failure.name
+                                        }
+                                        is CdpNetworkObserverResult.NetworkEnableFailed -> {
+                                            networkState = "NETWORK_ENABLE_FAILED"
+                                            semesterListenerState = "NETWORK_ENABLE_FAILED"
+                                            semesterListenerError = buildString {
+                                                append(result.failure.name)
+                                                result.protocolCode?.let { append(" · code=").append(it) }
+                                            }
+                                            semesterSession = semesterSession?.withState(
+                                                SemesterCollectionState.SEMESTER_COLLECTION_STOPPED
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            is CdpFrameTreeProbeResult.CommandFailed -> {
+                                semesterListenerState = "PAGE_GET_FRAME_TREE_FAILED"
+                                semesterListenerError = frameTree.failure.name
+                                semesterSession = semesterSession?.withState(
+                                    SemesterCollectionState.SEMESTER_COLLECTION_STOPPED
+                                )
+                            }
+                            CdpFrameTreeProbeResult.MainFrameUrlMissing -> {
+                                semesterListenerState = "TARGET_NOT_SCHOOL_PAGE"
+                                semesterListenerError = "主 Frame URL 缺失，未启用 Network。"
+                                semesterSession = semesterSession?.withState(
+                                    SemesterCollectionState.SEMESTER_COLLECTION_STOPPED
+                                )
+                            }
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                semesterListenerState = if (observerStarted) "CDP_SESSION_LOST" else "SEMESTER_COLLECTION_START_FAILED"
+                semesterListenerError = exception.javaClass.simpleName.ifBlank { "Exception" }
+                val current = semesterSession
+                if (current != null) {
+                    semesterSession = if (observerStarted) current.markCdpDisconnected() else
+                        current.withState(SemesterCollectionState.SEMESTER_COLLECTION_STOPPED)
+                }
+            } finally {
+                captureChannel.close()
+                withContext(NonCancellable) { processorJob?.join() }
+                runCatching { cdpClient?.close() }
+                if (cdpClient == null) runCatching { openedStream?.close() }
+                if (semesterCaptureChannel === captureChannel) semesterCaptureChannel = null
+                if (semesterCaptureProcessorJob === processorJob) semesterCaptureProcessorJob = null
+                if (semesterCollectionJob === collectionJob) semesterCollectionJob = null
+                if (semesterListenerState == "STOPPING") {
+                    semesterListenerState = if (semesterSession?.coverageComplete == true) {
+                        "SEMESTER_COVERAGE_COMPLETE"
+                    } else {
+                        "SEMESTER_COLLECTION_STOPPED"
+                    }
+                }
+                val finalSession = semesterSession
+                if (finalSession != null && finalSession.sessionState != SemesterCollectionState.SEMESTER_COLLECTION_RUNNING) {
+                    withContext(NonCancellable) { persistSemesterSessionSafely(finalSession) }
+                }
+                busy = false
+            }
+        }
+        semesterCollectionJob = collectionJob
+    }
+
+    fun clearSemesterCollection() {
+        if (semesterCollectionJob != null || (semesterSession == null && semesterSessionStoreError == null)) return
+        semesterSession = null
+        semesterPreview = null
+        semesterListenerError = null
+        semesterListenerState = "IDLE"
+        semesterSessionStoreError = null
+        operationScope.launch {
+            try {
+                withContext(Dispatchers.IO) { semesterStore.clear() }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                semesterSessionStoreError = exception.javaClass.simpleName.ifBlank { "IOException" }
+            }
+        }
+    }
+
     fun startCourseNetworkListener() {
-        if (networkListenerJob != null || busy) return
+        if (networkListenerJob != null || semesterCollectionJob != null || busy) return
         val port = connectPort.toIntOrNull()
         if (port == null || port !in 1..65535) {
             networkListenerState = "FAILED"
@@ -1447,6 +1780,114 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
 
+        SectionLabel("Phase 6B · 整学期多周采集")
+        AppCard(Modifier.fillMaxWidth()) {
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+                Text(
+                    "只接收企业微信课表页手动切周后产生的已确认响应，并用响应 zc 识别周次。不会自动切周、主动构造学校请求或写入正式课程表数据库。采集进度只保存在本机 App 私有目录；不保存原始 JSON、完整请求、headers 或 liveUrl。",
+                    style = AppType.body,
+                    color = colors.ink
+                )
+                Text(
+                    "先完成 SCHOOL_TARGET_FOUND 并确认 UID 2000。点击开始后切回企业微信，手动浏览各周；如果 CDP 断开，返回后重新发现 Target，再继续已有 Session。",
+                    style = AppType.caption,
+                    color = colors.mut
+                )
+                Text("采集状态：${semesterListenerState}", style = AppType.caption, color = colors.ink)
+                if (!semesterSessionStoreReady) {
+                    Text("正在读取本机临时采集进度…", style = AppType.caption, color = colors.mut)
+                } else {
+                    val session = semesterSession
+                    if (session == null) {
+                        Text("当前没有临时 Session。", style = AppType.caption, color = colors.mut)
+                    } else {
+                        Text(
+                            "Session：${session.sessionState.name} · 学年：${session.academicYear ?: "等待响应"} · 学校学期：${session.semesterFlag ?: "等待响应"}",
+                            style = AppType.caption,
+                            color = colors.ink
+                        )
+                        Text(
+                            "最大周：${session.maxWeek ?: "等待学校返回 maxzc"} · 已采集：${session.capturedWeeks.size} / ${session.maxWeek ?: "—"} 周",
+                            style = AppType.caption,
+                            color = colors.ink
+                        )
+                        Text("已采集周：${formatWeekSet(session.capturedWeeks)}", style = AppType.caption, color = colors.ink)
+                        Text(
+                            "缺失周：${if (session.maxWeek == null) "等待首个有效响应" else formatWeekSet(session.missingWeeks)}",
+                            style = AppType.caption,
+                            color = if (session.missingWeeks.isEmpty() && session.maxWeek != null) colors.ink else colors.mut
+                        )
+                        Text(
+                            "原始规则发现：${session.rawRuleCount} · 跨周精确去重后：${session.uniqueRuleCount} · 有警告规则：${session.rulesByKey.values.count { it.warnings.isNotEmpty() || !session.ruleWarningsByKey[it.ruleKey].isNullOrEmpty() }}",
+                            style = AppType.caption,
+                            color = colors.ink
+                        )
+                        session.lastCapturedWeek?.let { week ->
+                            val recaptured = session.recaptureCountByWeek[week] ?: 0
+                            Text(
+                                "最后捕获：第${week}周${if (recaptured > 0) " · 已重新采集 $recaptured 次" else ""}",
+                                style = AppType.caption,
+                                color = colors.mut
+                            )
+                        }
+                        if (session.backgroundCdpSurvived) {
+                            Text("BACKGROUND_CDP_SURVIVED：App 切到后台期间仍收到并保存课表响应。", style = AppType.caption, color = colors.ink)
+                        }
+                        if (session.warnings.isNotEmpty()) {
+                            Text(
+                                "Session 警告：${session.warnings.joinToString(" · ") { it.name }}",
+                                style = AppType.caption,
+                                color = colors.danger
+                            )
+                        }
+                    }
+                }
+                semesterSessionStoreError?.let {
+                    Text("本机保存诊断：$it", style = AppType.caption, color = colors.danger)
+                }
+                semesterListenerError?.let {
+                    Text("监听诊断：$it", style = AppType.caption, color = colors.danger)
+                }
+                when {
+                    semesterCollectionJob != null -> PillButton(
+                        "停止采集",
+                        onClick = ::stopSemesterCollection,
+                        style = PillStyle.Secondary
+                    )
+                    !semesterSessionStoreReady -> Unit
+                    else -> PillButton(
+                        when (semesterSession?.sessionState) {
+                            null -> "开始整学期采集"
+                            SemesterCollectionState.CDP_SESSION_LOST -> "重新连接并继续"
+                            SemesterCollectionState.SEMESTER_COVERAGE_COMPLETE -> "重连后复采（可选）"
+                            SemesterCollectionState.SEMESTER_COLLECTION_STOPPED -> "重新连接并继续"
+                            SemesterCollectionState.SEMESTER_COLLECTION_RUNNING -> "恢复采集连接"
+                        },
+                        onClick = ::startSemesterCollection,
+                        style = PillStyle.Primary
+                    )
+                }
+                if (semesterSession?.snapshotsByWeek?.isNotEmpty() == true) {
+                    PillButton(
+                        "生成整学期预览",
+                        onClick = {
+                            semesterSession?.let { semesterPreview = mergeSemesterSession(it) }
+                        },
+                        style = PillStyle.Secondary
+                    )
+                }
+                if (semesterSession != null || semesterSessionStoreError != null) {
+                    PillButton(
+                        "清除采集",
+                        onClick = ::clearSemesterCollection,
+                        style = PillStyle.Ghost,
+                        danger = true
+                    )
+                }
+                semesterPreview?.let { SemesterPreviewPanel(it) }
+            }
+        }
+
         SectionLabel("命令结束协议回归检查")
         AppCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
@@ -1670,6 +2111,93 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun SemesterPreviewPanel(schedule: MergedSemesterSchedule) {
+    val colors = LocalAppColors.current
+    val snapshot = schedule.snapshot
+    val candidatesByRule = schedule.candidates.groupBy { it.sourceRuleKey }
+    SectionLabel("整学期合并预览")
+    Text(
+        if (schedule.coverageComplete) "SEMESTER_COVERAGE_COMPLETE" else "PARTIAL_SEMESTER_PREVIEW",
+        style = AppType.caption,
+        color = if (schedule.coverageComplete) colors.ink else colors.mut
+    )
+    Text("来源：山东商务职业学院", style = AppType.body, color = colors.ink)
+    Text(
+        "学年：${snapshot.academicYear ?: "—"} · 学校学期标识：${snapshot.semesterFlag ?: "—"}",
+        style = AppType.caption,
+        color = colors.ink
+    )
+    Text(
+        "覆盖：${schedule.capturedWeeks.size} / ${snapshot.maxWeek ?: "—"} 周 · 已采集：${formatWeekSet(schedule.capturedWeeks)} · 缺失：${formatWeekSet(schedule.missingWeeks)}",
+        style = AppType.caption,
+        color = colors.ink
+    )
+    Text(
+        "原始 Snapshot：${schedule.rawSnapshotCount} · 原始排课规则累计：${schedule.rawRuleCount} · 跨周去重：${schedule.crossWeekDuplicateCount}",
+        style = AppType.caption,
+        color = colors.ink
+    )
+    Text(
+        "整学期唯一规则：${schedule.uniqueRuleCount} · 按周展开候选条目：${schedule.candidates.size} · 有警告规则：${schedule.warningRuleCount}",
+        style = AppType.caption,
+        color = colors.ink
+    )
+    Text(
+        "规则警告仅提示数据覆盖差异，不自动改写学校数据。",
+        style = AppType.caption,
+        color = colors.mut
+    )
+    if (schedule.collectionWarnings.isNotEmpty()) {
+        Text(
+            "Session 警告：${schedule.collectionWarnings.joinToString(" · ") { it.name }}",
+            style = AppType.caption,
+            color = colors.danger
+        )
+    }
+
+    val groupedRules = snapshot.courseRules
+        .groupBy { it.courseCode.orEmpty() to (it.courseName?.takeIf(String::isNotBlank) ?: "（课程名称缺失）") }
+        .entries
+        .sortedWith(compareBy({ it.key.second.lowercase() }, { it.key.first }))
+    val weekdayLabels = listOf("一", "二", "三", "四", "五", "六", "日")
+    groupedRules.forEach { (identity, rules) ->
+        val groupTitle = buildString {
+            append(identity.second)
+            if (identity.first.isNotBlank()) append(" · ").append(identity.first)
+        }
+        SectionLabel(groupTitle)
+        rules.sortedWith(compareBy<SchoolCourseRule> { it.dayOfWeek }.thenBy { it.startSection ?: Int.MAX_VALUE }
+            .thenBy { it.displayLocation.orEmpty() }
+        ).forEachIndexed { index, rule ->
+            SchoolImportRulePreview(
+                rule = rule,
+                ruleIndex = index + 1,
+                candidates = candidatesByRule[rule.ruleKey].orEmpty(),
+                weekdayLabel = weekdayLabels[(rule.dayOfWeek - 1).coerceIn(0, 6)]
+            )
+            Text(
+                "采集来源周：${formatWeekSet(schedule.sourceWeeksByRuleKey[rule.ruleKey].orEmpty())}",
+                style = AppType.caption,
+                color = colors.mut
+            )
+            val coverageWarnings = schedule.ruleWarningsByKey[rule.ruleKey].orEmpty()
+            if (coverageWarnings.isNotEmpty()) {
+                Text(
+                    coverageWarnings.joinToString(" · ") { it.name },
+                    style = AppType.caption,
+                    color = colors.danger
+                )
+            }
+        }
+    }
+    Text(
+        "正式课表数据库未修改；正式导入将在下一阶段决定。",
+        style = AppType.caption,
+        color = colors.mut
+    )
 }
 
 @Composable
