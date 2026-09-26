@@ -323,7 +323,10 @@ internal fun ScheduleApp(
                                             copies.mapIndexed { index, course ->
                                                 course.copy(
                                                     id = System.nanoTime() + index,
-                                                    weekNumber = targetWeekNumber
+                                                    weekNumber = targetWeekNumber,
+                                                    sourceType = com.burgess.schedule.data.CourseSourceType.NON_SDBI,
+                                                    sourceSemesterKey = null,
+                                                    externalKey = null
                                                 ).toEntity()
                                             }
                                         )
@@ -1133,7 +1136,10 @@ private fun CourseEditorDialog(
                             period = selectedPeriod,
                             endPeriod = selectedEndPeriod,
                             weekNumber = course?.weekNumber ?: initialWeekNumber,
-                            color = course?.color ?: courseAccentFor(System.currentTimeMillis())
+                            color = course?.color ?: courseAccentFor(System.currentTimeMillis()),
+                            sourceType = course?.sourceType ?: com.burgess.schedule.data.CourseSourceType.NON_SDBI,
+                            sourceSemesterKey = course?.sourceSemesterKey,
+                            externalKey = course?.externalKey
                         )
                         onSave(saved)
                         requestDismiss()

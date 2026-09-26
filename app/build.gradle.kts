@@ -8,7 +8,7 @@ import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
-import org.gradle.api.tasks.testing.Test
+import org.gradle.api.tasks.JavaExec
 
 plugins {
     alias(libs.plugins.android.application)
@@ -129,28 +129,12 @@ dependencies {
 }
 
 // AGP 9.3's built-in Kotlin compiler puts Android unit-test classes under
-// intermediates/built_in_kotlinc. Keep the normal Android task untouched and
-// expose a deterministic JVM runner for the same compiled test sources.
+// intermediates/built_in_kotlinc. Run those classes directly because Gradle's
+// Test worker currently discovers them but cannot load them from this output.
 val debugUnitTestKotlinClasses = layout.buildDirectory.dir(
     "intermediates/built_in_kotlinc/debugUnitTest/compileDebugUnitTestKotlin/classes"
 )
-val debugMainKotlinClasses = layout.buildDirectory.dir(
-    "intermediates/built_in_kotlinc/debug/compileDebugKotlin/classes"
-)
-val testRuntimeDirectory = layout.buildDirectory.dir("test-runtime")
 val androidTestRuntimeDirectory = layout.buildDirectory.dir("test-runtime/android")
-val portableTestClasses = tasks.register<Jar>("portableTestClasses") {
-    dependsOn("compileDebugUnitTestKotlin")
-    from(debugUnitTestKotlinClasses)
-    destinationDirectory.set(testRuntimeDirectory)
-    archiveFileName.set("schedule-tests.jar")
-}
-val portableMainClasses = tasks.register<Jar>("portableMainClasses") {
-    dependsOn("compileDebugKotlin")
-    from(debugMainKotlinClasses)
-    destinationDirectory.set(testRuntimeDirectory)
-    archiveFileName.set("schedule-main.jar")
-}
 abstract class ExtractAarClassesTask : DefaultTask() {
     @get:InputFiles
     @get:PathSensitive(PathSensitivity.NONE)
@@ -180,18 +164,31 @@ val portableAndroidRuntime = tasks.register<ExtractAarClassesTask>("portableAndr
     runtimeArtifacts.from(configurations.named("debugUnitTestRuntimeClasspath"))
     destinationDirectory.set(androidTestRuntimeDirectory)
 }
-tasks.register<Test>("verifyDebugUnitTests") {
+tasks.register<JavaExec>("verifyDebugUnitTests") {
     dependsOn(portableAndroidRuntime)
-    dependsOn(portableTestClasses, portableMainClasses)
     dependsOn("compileDebugKotlin", "compileDebugUnitTestKotlin")
-    testClassesDirs = project.files(debugUnitTestKotlinClasses)
     classpath = project.files(
-        portableTestClasses.flatMap { it.archiveFile },
-        portableMainClasses.flatMap { it.archiveFile },
+        debugUnitTestKotlinClasses,
+        layout.projectDirectory.dir("src/test/resources"),
         fileTree(androidTestRuntimeDirectory) { include("*.jar") },
         configurations.getByName("debugUnitTestRuntimeClasspath")
     )
-    useJUnit()
+    mainClass.set("org.junit.runner.JUnitCore")
+    doFirst {
+        val testRoot = debugUnitTestKotlinClasses.get().asFile
+        val testNames = fileTree(testRoot)
+            .matching { include("**/*Test.class") }
+            .files
+            .filterNot { '$' in it.name }
+            .map { testClass ->
+                testRoot.toPath().relativize(testClass.toPath()).toString()
+                    .replace(File.separatorChar, '.')
+                    .removeSuffix(".class")
+            }
+            .sorted()
+        check(testNames.isNotEmpty()) { "No compiled JVM test classes were found" }
+        setArgs(testNames)
+    }
 }
 
 ksp { arg("room.schemaLocation", "$projectDir/schemas") }

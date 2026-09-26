@@ -4,6 +4,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import com.burgess.schedule.data.CourseEntity
+import com.burgess.schedule.data.CourseSourceType
 import com.burgess.schedule.data.SchoolSchedule
 import com.burgess.schedule.ui.theme.CoursePalette
 import java.util.Locale
@@ -19,7 +20,10 @@ internal data class Course(
     val color: Color,
     val endPeriod: Int = period,
     val weekNumber: Int = 0,
-    val shortName: String? = null
+    val shortName: String? = null,
+    val sourceType: String = CourseSourceType.NON_SDBI,
+    val sourceSemesterKey: String? = null,
+    val externalKey: String? = null
 )
 
 internal data class FocusCourse(
@@ -70,6 +74,9 @@ internal fun CourseEntity.toCourse(): Course {
         endPeriod = safeEndPeriod,
         weekNumber = weekNumber,
         shortName = shortName,
+        sourceType = sourceType,
+        sourceSemesterKey = sourceSemesterKey,
+        externalKey = externalKey,
         color = colorValue.takeIf { it != 0 }?.let { Color(it) } ?: courseAccentFor(id)
     )
 }
@@ -87,7 +94,10 @@ internal fun Course.toEntity(): CourseEntity {
         endPeriod = safeEndPeriod,
         weekNumber = weekNumber,
         colorValue = color.toArgb(),
-        shortName = shortName
+        shortName = shortName,
+        sourceType = sourceType,
+        sourceSemesterKey = sourceSemesterKey,
+        externalKey = externalKey
     )
 }
 

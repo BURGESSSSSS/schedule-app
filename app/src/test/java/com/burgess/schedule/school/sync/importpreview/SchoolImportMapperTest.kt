@@ -6,6 +6,9 @@ import java.nio.charset.StandardCharsets
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -55,6 +58,71 @@ class SchoolImportMapperTest {
         assertEquals(20, weekCandidate.weekNumber)
         assertFalse(weekCandidate.importable)
         assertTrue(SchoolParseWarning.WEEK_OUT_OF_RANGE in weekCandidate.warnings)
+    }
+
+    @Test
+    fun stableIdentityIgnoresTeacherRoomWeekAndTransientRuleKey() {
+        val rule = fixtureSnapshot().courseRules.first {
+            !it.courseCode.isNullOrBlank() && !it.teachingClassCode.isNullOrBlank() &&
+                it.startSection != null && it.endSection != null
+        }
+        val original = SchoolImportIdentity.externalKey("2026-2027", "1", rule)
+        val changedContent = SchoolImportIdentity.externalKey(
+            "2026-2027",
+            "1",
+            rule.copy(
+                ruleKey = "different-preview-key",
+                teacher = "Changed teacher",
+                displayLocation = "E303",
+                weeks = listOf(2, 4, 6)
+            )
+        )
+
+        assertNotNull(original)
+        assertEquals(original, changedContent)
+        assertNotEquals(original, SchoolImportIdentity.externalKey("2026-2027", "2", rule))
+        assertNotEquals(
+            original,
+            SchoolImportIdentity.externalKey("2026-2027", "1", rule.copy(dayOfWeek = (rule.dayOfWeek % 7) + 1))
+        )
+    }
+
+    @Test
+    fun stableIdentityFailsClosedWhenBothSchoolCodesAreMissing() {
+        val rule = fixtureSnapshot().courseRules.first().copy(courseCode = null, teachingClassCode = null)
+        assertNull(SchoolImportIdentity.externalKey("2026-2027", "1", rule))
+    }
+
+    @Test
+    fun formalMapperExpandsDiscreteWeeksWithoutFlatteningTheSet() {
+        val snapshot = fixtureSnapshot()
+        val rule = snapshot.courseRules.first {
+            it.courseName == "离散周课程" && SchoolImportMapper.canMapRule(it, snapshot.maxWeek)
+        }
+        val onlyRuleSnapshot = snapshot.copy(courseRules = listOf(rule))
+        val maxWeek = requireNotNull(snapshot.maxWeek)
+        val merged = MergedSemesterSchedule(
+            snapshot = onlyRuleSnapshot,
+            candidates = SchoolImportMapper.map(onlyRuleSnapshot),
+            capturedWeeks = (1..maxWeek).toSet(),
+            missingWeeks = emptySet(),
+            sourceWeeksByRuleKey = mapOf(rule.ruleKey to rule.weeks.toSet()),
+            ruleWarningsByKey = emptyMap(),
+            rawSnapshotCount = maxWeek,
+            rawRuleCount = 1,
+            crossWeekDuplicateCount = 0,
+            uniqueRuleCount = 1,
+            warningRuleCount = 0,
+            coverageComplete = true,
+            collectionWarnings = emptySet()
+        )
+
+        val input = SchoolImportMapper.prepare(merged)
+
+        assertTrue(input.conflicts.isEmpty())
+        assertEquals(rule.weeks.toSet(), input.courses.map { it.weekNumber }.toSet())
+        assertEquals(1, input.courses.map { it.externalKey }.toSet().size)
+        assertTrue(input.courses.all { it.sourceType == "SDBI" })
     }
 
     private fun fixtureSnapshot(): SchoolScheduleSnapshot {

@@ -6,7 +6,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -44,9 +46,13 @@ import com.burgess.schedule.ui.theme.AppSpace
 import com.burgess.schedule.ui.theme.AppType
 import com.burgess.schedule.ui.theme.LocalAppColors
 import com.burgess.schedule.school.sync.importpreview.SchoolCourseRule
+import com.burgess.schedule.school.sync.importpreview.SchoolImportBlockReason
+import com.burgess.schedule.school.sync.importpreview.SchoolImportExecutionResult
 import com.burgess.schedule.school.sync.importpreview.SchoolImportMapper
+import com.burgess.schedule.school.sync.importpreview.SchoolImportPlan
 import com.burgess.schedule.school.sync.importpreview.SchoolImportPreview
 import com.burgess.schedule.school.sync.importpreview.SchoolImportPreviewSummary
+import com.burgess.schedule.school.sync.importpreview.SchoolImportRepository
 import com.burgess.schedule.school.sync.importpreview.SchoolParseWarning
 import com.burgess.schedule.school.sync.importpreview.MergedSemesterSchedule
 import com.burgess.schedule.school.sync.importpreview.SemesterCollectionSession
@@ -56,6 +62,7 @@ import com.burgess.schedule.school.sync.importpreview.SemesterCollectionWarning
 import com.burgess.schedule.school.sync.importpreview.SemesterRuleCoverageWarning
 import com.burgess.schedule.school.sync.importpreview.SemesterSessionLoadResult
 import com.burgess.schedule.school.sync.importpreview.SemesterSnapshotCaptureResult
+import com.burgess.schedule.data.CourseDatabase
 import com.burgess.schedule.school.sync.importpreview.formatWeekSet
 import com.burgess.schedule.school.sync.importpreview.mergeSemesterSession
 import com.burgess.schedule.school.sync.importpreview.recordSnapshot
@@ -187,6 +194,9 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     val context = LocalContext.current.applicationContext
     val client = remember(context) { LocalAdbClient(context) }
     val semesterStore = remember(context) { SemesterCollectionStore(context) }
+    val schoolImportRepository = remember(context) {
+        SchoolImportRepository(CourseDatabase.getInstance(context))
+    }
     val operationScope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
     val colors = LocalAppColors.current
@@ -247,6 +257,11 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var semesterListenerState by remember { mutableStateOf("IDLE") }
     var semesterListenerError by remember { mutableStateOf<String?>(null) }
     var semesterPreview by remember { mutableStateOf<MergedSemesterSchedule?>(null) }
+    var schoolImportPlan by remember { mutableStateOf<SchoolImportPlan?>(null) }
+    var schoolImportPreparing by remember { mutableStateOf(false) }
+    var schoolImportWriting by remember { mutableStateOf(false) }
+    var schoolImportConfirmVisible by remember { mutableStateOf(false) }
+    var schoolImportResult by remember { mutableStateOf<SchoolImportExecutionResult?>(null) }
     val semesterStoreMutex = remember(semesterStore) { Mutex() }
     var probePort by remember { mutableStateOf<Int?>(null) }
     var lastError by remember { mutableStateOf<String?>(null) }
@@ -280,6 +295,40 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             throw cancelled
         } catch (exception: Exception) {
             semesterSessionStoreError = exception.javaClass.simpleName.ifBlank { "IOException" }
+        }
+    }
+
+    fun prepareSchoolImport(schedule: MergedSemesterSchedule) {
+        if (schoolImportPreparing || schoolImportWriting) return
+        schoolImportPreparing = true
+        schoolImportPlan = null
+        schoolImportResult = null
+        operationScope.launch {
+            try {
+                schoolImportPlan = schoolImportRepository.prepare(SchoolImportMapper.prepare(schedule))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                schoolImportResult = SchoolImportExecutionResult.Failed(
+                    exception.javaClass.simpleName.ifBlank { "ImportPlanException" }
+                )
+            } finally {
+                schoolImportPreparing = false
+            }
+        }
+    }
+
+    fun confirmSchoolImport() {
+        val plan = schoolImportPlan ?: return
+        if (!plan.canConfirm || schoolImportWriting) return
+        schoolImportConfirmVisible = false
+        schoolImportWriting = true
+        operationScope.launch {
+            try {
+                schoolImportResult = schoolImportRepository.import(plan)
+            } finally {
+                schoolImportWriting = false
+            }
         }
     }
 
@@ -760,6 +809,9 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             .withState(SemesterCollectionState.SEMESTER_COLLECTION_RUNNING)
         semesterSession = session
         semesterPreview = null
+        schoolImportPlan = null
+        schoolImportResult = null
+        schoolImportConfirmVisible = false
         semesterListenerError = null
         semesterSessionStoreError = null
         semesterListenerState = "CDP_CONNECT_START"
@@ -795,6 +847,9 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                                     if (!appInForeground) updated = updated.markBackgroundCdpSurvived()
                                     semesterSession = updated
                                     semesterPreview = null
+                                    schoolImportPlan = null
+                                    schoolImportResult = null
+                                    schoolImportConfirmVisible = false
                                     semesterListenerState = when {
                                         updated.coverageComplete -> "SEMESTER_COVERAGE_COMPLETE"
                                         !appInForeground -> "BACKGROUND_CDP_SURVIVED"
@@ -955,6 +1010,9 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         if (semesterCollectionJob != null || (semesterSession == null && semesterSessionStoreError == null)) return
         semesterSession = null
         semesterPreview = null
+        schoolImportPlan = null
+        schoolImportResult = null
+        schoolImportConfirmVisible = false
         semesterListenerError = null
         semesterListenerState = "IDLE"
         semesterSessionStoreError = null
@@ -1871,7 +1929,12 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     PillButton(
                         "生成整学期预览",
                         onClick = {
-                            semesterSession?.let { semesterPreview = mergeSemesterSession(it) }
+                            semesterSession?.let {
+                                semesterPreview = mergeSemesterSession(it)
+                                schoolImportPlan = null
+                                schoolImportResult = null
+                                schoolImportConfirmVisible = false
+                            }
                         },
                         style = PillStyle.Secondary
                     )
@@ -1884,7 +1947,20 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                         danger = true
                     )
                 }
-                semesterPreview?.let { SemesterPreviewPanel(it) }
+                semesterPreview?.let { preview ->
+                    SemesterPreviewPanel(preview)
+                    SchoolImportPlanPanel(
+                        plan = schoolImportPlan,
+                        preparing = schoolImportPreparing,
+                        writing = schoolImportWriting,
+                        confirmVisible = schoolImportConfirmVisible,
+                        result = schoolImportResult,
+                        onPrepare = { prepareSchoolImport(preview) },
+                        onRequestConfirm = { schoolImportConfirmVisible = true },
+                        onDismissConfirm = { schoolImportConfirmVisible = false },
+                        onConfirm = ::confirmSchoolImport
+                    )
+                }
             }
         }
 
@@ -2194,7 +2270,7 @@ private fun SemesterPreviewPanel(schedule: MergedSemesterSchedule) {
         }
     }
     Text(
-        "正式课表数据库未修改；正式导入将在下一阶段决定。",
+        "正式课表数据库尚未修改；完整覆盖后可在下方生成导入计划。",
         style = AppType.caption,
         color = colors.mut
     )
@@ -2261,7 +2337,128 @@ private fun SchoolImportPreviewPanel(
             }
         }
     Text("ID、课程颜色、周视图简称：IMPORT_DEFAULT（未生成正式值）", style = AppType.caption, color = colors.mut)
-    Text("导入功能将在下一阶段开放。", style = AppType.caption, color = colors.mut)
+    Text("单周预览不会直接写入正式数据库；请完成整学期采集后再准备导入。", style = AppType.caption, color = colors.mut)
+}
+
+@Composable
+private fun SchoolImportPlanPanel(
+    plan: SchoolImportPlan?,
+    preparing: Boolean,
+    writing: Boolean,
+    confirmVisible: Boolean,
+    result: SchoolImportExecutionResult?,
+    onPrepare: () -> Unit,
+    onRequestConfirm: () -> Unit,
+    onDismissConfirm: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    val colors = LocalAppColors.current
+    SectionLabel("Phase 6C · 正式导入计划")
+    AppCard(Modifier.fillMaxWidth()) {
+        Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
+            Text(
+                "仅写入 SDBI 学校课程；NON_SDBI 旧课程不会被导入流程修改或删除。学校中已不存在的课程只列出，不自动删除。",
+                style = AppType.body,
+                color = colors.ink
+            )
+            PillButton(
+                if (preparing) "正在计算导入计划…" else "准备导入",
+                onClick = { if (!preparing && !writing) onPrepare() },
+                style = PillStyle.Secondary
+            )
+            plan?.let { current ->
+                Text("学校：山东商务职业学院", style = AppType.caption, color = colors.ink)
+                Text(
+                    "学年：${current.input.academicYear ?: "—"} · 学期：${current.input.semesterFlag ?: "—"}",
+                    style = AppType.caption,
+                    color = colors.ink
+                )
+                Text(
+                    "覆盖：${current.input.capturedWeeks.size} / ${current.input.maxWeek ?: "—"}",
+                    style = AppType.caption,
+                    color = colors.ink
+                )
+                Text(
+                    "新增：${current.toInsert.size} · 更新：${current.toUpdate.size} · 无变化：${current.unchanged.size}",
+                    style = AppType.body,
+                    color = colors.ink
+                )
+                Text(
+                    "学校中已不存在：${current.missingFromSchool.size} · 冲突：${current.conflictCount}",
+                    style = AppType.caption,
+                    color = if (current.conflictCount > 0) colors.danger else colors.mut
+                )
+                current.blockReason?.let { reason ->
+                    Text(importBlockReasonLabel(reason), style = AppType.caption, color = colors.danger)
+                }
+                if (current.conflicts.isNotEmpty()) {
+                    Text(
+                        current.conflicts.joinToString(" · ") { "${it.code.name} (${it.count})" },
+                        style = AppType.caption,
+                        color = colors.danger
+                    )
+                }
+                if (current.canConfirm) {
+                    PillButton(
+                        if (writing) "正在导入…" else "确认导入",
+                        onClick = { if (!writing && !preparing) onRequestConfirm() },
+                        style = PillStyle.Primary
+                    )
+                }
+            }
+            when (val state = result) {
+                is SchoolImportExecutionResult.Success -> {
+                    Text(
+                        "SCHOOL_IMPORT_SUCCESS · 新增 ${state.inserted} · 更新 ${state.updated} · 无变化 ${state.unchanged} · 未自动删除 ${state.missingFromSchool}",
+                        style = AppType.caption,
+                        color = colors.ink
+                    )
+                    Text("学校课程已写入本地课程表。", style = AppType.body, color = colors.ink)
+                }
+                SchoolImportExecutionResult.StalePlan -> Text(
+                    "IMPORT_PLAN_STALE · 数据库状态已变化，请重新准备并核对计划。",
+                    style = AppType.caption,
+                    color = colors.danger
+                )
+                is SchoolImportExecutionResult.Blocked -> Text(
+                    "IMPORT_BLOCKED · ${importBlockReasonLabel(state.reason)}",
+                    style = AppType.caption,
+                    color = colors.danger
+                )
+                is SchoolImportExecutionResult.Failed -> Text(
+                    "SCHOOL_IMPORT_FAILED · ${state.exceptionType} · 数据库事务已回滚。",
+                    style = AppType.caption,
+                    color = colors.danger
+                )
+                null -> Unit
+            }
+            Text(
+                "导入后可从此页返回，再打开今日页或周视图检查课程。",
+                style = AppType.caption,
+                color = colors.mut
+            )
+        }
+    }
+
+    if (confirmVisible) {
+        AlertDialog(
+            onDismissRequest = onDismissConfirm,
+            title = { Text("确认导入学校课表？") },
+            text = { Text("将向本地课程表写入学校课程。现有本地课程不会被删除。") },
+            confirmButton = {
+                TextButton(onClick = onConfirm) { Text("确认导入") }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissConfirm) { Text("取消") }
+            }
+        )
+    }
+}
+
+private fun importBlockReasonLabel(reason: SchoolImportBlockReason): String = when (reason) {
+    SchoolImportBlockReason.INCOMPLETE_SEMESTER -> "IMPORT_BLOCKED_INCOMPLETE_SEMESTER · 必须完整采集全部周次。"
+    SchoolImportBlockReason.MISSING_SEMESTER_METADATA -> "导入已阻止：学年或学期标识缺失。"
+    SchoolImportBlockReason.FATAL_CONFLICTS -> "导入已阻止：先处理身份、规则或数据库冲突。"
 }
 
 @Composable
