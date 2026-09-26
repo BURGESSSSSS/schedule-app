@@ -257,7 +257,13 @@ internal fun DevLogScreen(onBack: () -> Unit) {
 @Preview @Composable private fun DevLogLight() { 课程表Theme(false) { DevLogScreen({}) } }
 
 @Composable
-internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, onDeveloperClick: () -> Unit, onLocalAdbSmokeClick: () -> Unit = {}) {
+internal fun MoreScreen(
+    onReminderClick: () -> Unit,
+    onDevLogClick: () -> Unit,
+    onDeveloperClick: () -> Unit,
+    onSchoolSyncClick: () -> Unit = {},
+    onSchoolSyncDiagnosticsClick: () -> Unit = {}
+) {
     Column(
         Modifier.fillMaxSize().padding(AppSpace.page),
         verticalArrangement = Arrangement.spacedBy(AppSpace.gap)
@@ -266,6 +272,8 @@ internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, 
         SectionLabel("课程")
         ListGroup {
             ListRow("课程提醒", "通知权限和测试通知", onReminderClick, icon = R.drawable.symbol_notifications)
+            HorizontalDivider(color = Hairline)
+            ListRow("学校课表同步", "从企业微信教务系统导入课程", onSchoolSyncClick, icon = R.drawable.symbol_history)
         }
         SectionLabel("关于")
         ListGroup {
@@ -276,7 +284,7 @@ internal fun MoreScreen(onReminderClick: () -> Unit, onDevLogClick: () -> Unit, 
         if (BuildConfig.DEBUG) {
             SectionLabel("开发调试")
             ListGroup {
-                ListRow("Local ADB 只读验证", "连接确认与 WebView socket 发现", onLocalAdbSmokeClick)
+                ListRow("学校同步诊断", "连接与采集问题排查", onSchoolSyncDiagnosticsClick)
             }
         }
         Spacer(Modifier.weight(1f))

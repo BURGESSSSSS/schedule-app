@@ -109,7 +109,8 @@ import kotlinx.coroutines.launch
 import androidx.lifecycle.repeatOnLifecycle
 import com.burgess.schedule.ui.today.*
 import com.burgess.schedule.ui.more.*
-import com.burgess.schedule.school.sync.localadb.LocalAdbSmokeScreen
+import com.burgess.schedule.school.sync.debug.SchoolSyncDiagnosticsScreen
+import com.burgess.schedule.ui.schoolsync.SchoolSyncScreen
 import com.burgess.schedule.ui.model.*
 import com.burgess.schedule.ui.components.SectionLabel
 import androidx.compose.runtime.key
@@ -172,7 +173,8 @@ internal fun ScheduleApp(
     var reminderStatus by remember { mutableStateOf(ReminderScheduler.getStatus(context)) }
     var devLogVisible by remember { mutableStateOf(false) }
     var developerVisible by remember { mutableStateOf(false) }
-    var localAdbSmokeVisible by remember { mutableStateOf(false) }
+    var schoolSyncVisible by remember { mutableStateOf(false) }
+    var schoolSyncDiagnosticsVisible by remember { mutableStateOf(false) }
     var importOptionsVisible by remember { mutableStateOf(false) }
     var importWeekNumber by remember { mutableStateOf(0) }
     var editorWeekNumber by remember { mutableStateOf(0) }
@@ -200,7 +202,8 @@ internal fun ScheduleApp(
     var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
     // Only visible course pages need a minute ticker; overlays and background stop it.
     val scheduleVisible = selectedPage in 0..1 && expandedCourse == null &&
-        !editorVisible && !ocrVisible && !reminderVisible && !devLogVisible && !developerVisible && !localAdbSmokeVisible && !importOptionsVisible
+        !editorVisible && !ocrVisible && !reminderVisible && !devLogVisible && !developerVisible &&
+            !schoolSyncVisible && !schoolSyncDiagnosticsVisible && !importOptionsVisible
     LaunchedEffect(scheduleVisible) {
         if (scheduleVisible) (hostContext as LifecycleOwner).lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
@@ -365,7 +368,8 @@ internal fun ScheduleApp(
                     weekEditing = false
                     devLogVisible = false
                     developerVisible = false
-                    localAdbSmokeVisible = false
+                    schoolSyncVisible = false
+                    schoolSyncDiagnosticsVisible = false
                     reminderVisible = false
                     selectedPage = it
                 }
@@ -425,7 +429,8 @@ internal fun ScheduleApp(
                             onReminderClick = { reminderVisible = true },
                             onDevLogClick = { devLogVisible = true },
                             onDeveloperClick = { developerVisible = true },
-                            onLocalAdbSmokeClick = { localAdbSmokeVisible = true }
+                            onSchoolSyncClick = { schoolSyncVisible = true },
+                            onSchoolSyncDiagnosticsClick = { schoolSyncDiagnosticsVisible = true }
                         )
                     }
                 }
@@ -456,11 +461,22 @@ internal fun ScheduleApp(
                 DeveloperScreen(onBack = { developerVisible = false })
             }
             AnimatedVisibility(
-                visible = localAdbSmokeVisible,
+                visible = schoolSyncVisible,
                 enter = fadeIn(tween(220)) + slideInHorizontally(tween(280), initialOffsetX = { it / 10 }),
                 exit = fadeOut(tween(180)) + slideOutHorizontally(tween(220), targetOffsetX = { it / 10 })
             ) {
-                LocalAdbSmokeScreen(onBack = { localAdbSmokeVisible = false })
+                SchoolSyncScreen(
+                    onBack = { schoolSyncVisible = false },
+                    onViewToday = { schoolSyncVisible = false; selectedPage = 0 },
+                    onViewWeek = { schoolSyncVisible = false; selectedPage = 1 }
+                )
+            }
+            AnimatedVisibility(
+                visible = schoolSyncDiagnosticsVisible,
+                enter = fadeIn(tween(220)) + slideInHorizontally(tween(280), initialOffsetX = { it / 10 }),
+                exit = fadeOut(tween(180)) + slideOutHorizontally(tween(220), targetOffsetX = { it / 10 })
+            ) {
+                SchoolSyncDiagnosticsScreen(onBack = { schoolSyncDiagnosticsVisible = false })
             }
             AnimatedVisibility(
                 visible = reminderVisible,
