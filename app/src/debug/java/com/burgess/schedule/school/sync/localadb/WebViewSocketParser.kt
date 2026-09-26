@@ -49,11 +49,6 @@ internal data class ProcUnixTableResult(
     val socketNamesByInode: Map<Long, String?>
 )
 
-internal data class WeWorkProcess(
-    val pid: Int,
-    val processName: String
-)
-
 internal data class ProcessQueryResult(
     val state: ProcessQueryScanState,
     val processes: List<WeWorkProcess>

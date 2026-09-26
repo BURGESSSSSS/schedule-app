@@ -18,19 +18,11 @@ internal enum class GlobalSocketNameCategory(val label: String) {
     OTHER("OTHER")
 }
 
-internal data class NamedUnixSocket(
-    val inode: Long,
-    val type: Int,
-    val state: Int,
-    val socketName: String,
-    val isAbstract: Boolean
-) {
-    val instanceIdentity: UnixSocketInstanceIdentity
-        get() = UnixSocketInstanceIdentity(inode, type, state, socketName, isAbstract)
+internal val NamedUnixSocket.instanceIdentity: UnixSocketInstanceIdentity
+    get() = UnixSocketInstanceIdentity(inode, type, state, socketName, isAbstract)
 
-    val endpointIdentity: UnixSocketEndpointIdentity
-        get() = UnixSocketEndpointIdentity(type, state, socketName, isAbstract)
-}
+internal val NamedUnixSocket.endpointIdentity: UnixSocketEndpointIdentity
+    get() = UnixSocketEndpointIdentity(type, state, socketName, isAbstract)
 
 internal data class GlobalUnixSocketStats(
     val totalLines: Int,
