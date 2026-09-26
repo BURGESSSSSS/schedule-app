@@ -132,28 +132,28 @@ private fun CourseSlot(course: Course?, isFocus: Boolean, isInProgress: Boolean,
             verticalArrangement = Arrangement.spacedBy(AppSpace.gridGap)
         ) {
             if (course != null) {
-                val label = course.shortName?.takeIf { it.isNotBlank() } ?: shortName(course.name)
-                val latin = label.all { it.code < 128 }
-                val textWidth = width - AppSpace.cellHorizontal * 2
-                if (latin) {
-                    FittedWeekText(
+                val label = course.shortName?.takeIf { it.isNotBlank() } ?: course.name
+                if (titleRenderer == null) {
+                    Text(
                         text = label,
                         style = AppType.cell,
-                        width = textWidth,
                         color = foreground,
-                        renderer = titleRenderer?.let { drawTitle ->
-                            { text, fittedStyle, textColor, modifier ->
-                                drawTitle(text, fittedStyle, textColor, modifier, 1, false, TextOverflow.Ellipsis)
-                            }
-                        }
+                        maxLines = 2,
+                        softWrap = true,
+                        overflow = TextOverflow.Ellipsis
                     )
-                } else if (titleRenderer == null) {
-                    Text(label, style = AppType.cell, color = foreground, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 } else {
-                    titleRenderer?.invoke(label, AppType.cell, foreground, Modifier, 2, true, TextOverflow.Ellipsis)
+                    titleRenderer.invoke(label, AppType.cell, foreground, Modifier, 2, true, TextOverflow.Ellipsis)
                 }
-                if (showPeriodRange) FittedWeekText(compactPeriodRangeLabel(course), AppType.micro, textWidth, foreground)
-                FittedWeekText(roomNumber(course.room).ifBlank { "未填写" }, AppType.micro, textWidth, foreground)
+                if (showPeriodRange) FittedWeekText(compactPeriodRangeLabel(course), AppType.micro, width - AppSpace.cellHorizontal * 2, foreground)
+                Text(
+                    text = weekLocation(course.room).ifBlank { "未填写" },
+                    style = AppType.micro,
+                    color = foreground,
+                    maxLines = 2,
+                    softWrap = true,
+                    overflow = TextOverflow.Ellipsis
+                )
             } else if (editMode) {
                 Text("+", style = AppType.cardTitle, color = c.mut)
             }
@@ -243,7 +243,7 @@ private fun FittedWeekText(
     val samples = remember { listOf(
         Course(-101, "Node.js应用开发", "", "第二教学楼 E209", 0, 0, CoursePalette[0], endPeriod = 3),
         Course(-102, "高等数学（下）", "", "AB-302", 0, 2, CoursePalette[1], endPeriod = 3),
-        Course(-103, "艺术与审美", "", "教学楼 D201", 2, 0, CoursePalette[2], endPeriod = 1),
+        Course(-103, "区块链基础原理", "", "实训中心E区[数智基地32-实训中心E303]", 2, 0, CoursePalette[2], endPeriod = 1),
         Course(-104, "IntroductionToComputing", "", "C208", 4, 2, CoursePalette[3], endPeriod = 3),
         Course(-105, "交互设计", "", "实训楼 E209", 5, 0, CoursePalette[4], endPeriod = 1),
         Course(-106, "长课示例", "", "A101", 6, 0, CoursePalette[0], endPeriod = 5),
