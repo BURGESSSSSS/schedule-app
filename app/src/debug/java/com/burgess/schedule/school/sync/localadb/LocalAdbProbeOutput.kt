@@ -45,4 +45,10 @@ internal fun analyzePrintfTestOutput(output: String, exitCode: Int?): PrintfTest
     )
 }
 
+internal fun isEmptyMissingProcessQueryOutput(output: String, exitCode: Int?): Boolean {
+    if (exitCode != 0) return false
+    val lines = output.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+    return lines.size == 1 && lines.single().equals("PID NAME", ignoreCase = true)
+}
+
 private const val MAX_DIAGNOSTIC_OUTPUT_CHARS = 120

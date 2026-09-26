@@ -81,14 +81,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-internal enum class WebViewSocketScanState {
-    NOT_RUN,
-    SCANNING,
-    SNAPSHOT_RECORDED,
-    DIFF_COMPLETE,
-    SCAN_FAILED
-}
-
 internal enum class CommandExecutorProbeState {
     NOT_RUN,
     RUNNING,
@@ -135,14 +127,6 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var idOutput by remember { mutableStateOf("") }
     var uidState by remember { mutableStateOf("未验证") }
     var uidVerified by remember { mutableStateOf(false) }
-    var socketScanState by remember { mutableStateOf(WebViewSocketScanState.NOT_RUN) }
-    var globalSocketSnapshots by remember { mutableStateOf<Map<GlobalSocketSnapshotSlot, GlobalSocketSnapshot>>(emptyMap()) }
-    var activeSnapshotSlot by remember { mutableStateOf<GlobalSocketSnapshotSlot?>(null) }
-    var repeatedSocketDiff by remember { mutableStateOf<RepeatedUnixSocketDiff?>(null) }
-    var experimentClassification by remember { mutableStateOf<GlobalSocketExperimentClassification?>(null) }
-    var socketScanMessage by remember { mutableStateOf<String?>(null) }
-    var mapsScanResult by remember { mutableStateOf<ProcMapsScanResult?>(null) }
-    var mapsScanMessage by remember { mutableStateOf<String?>(null) }
     var commandProbe by remember { mutableStateOf(CommandExecutorProbeResult()) }
     var commandProbeResults by remember { mutableStateOf<Map<LocalAdbCommandDescriptor, CommandExecutorProbeResult>>(emptyMap()) }
     var devToolsStateHistory by remember { mutableStateOf<List<DevToolsDiscoveryState>>(emptyList()) }
@@ -260,7 +244,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         commandProbeResults = commandProbeResults + (kind to result)
     }
 
-    fun clearCdpPhase4Result() {
+    fun clearCdpProbeResult() {
         cdpWebSocketState = "NOT_RUN"
         cdpCommandState = "NOT_RUN"
         cdpHandshakeDiagnostic = null
@@ -283,7 +267,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     semesterCaptureProcessorJob?.join()
                     client.close()
                 } catch (_: Exception) {
-                    // The one-shot PoC has no background connection after the page is closed.
+                    // The diagnostics screen owns no connection after it is closed.
                 } finally {
                     cleanupScope.cancel()
                 }
@@ -322,20 +306,12 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         idOutput = ""
         uidState = "未验证"
         uidVerified = false
-        socketScanState = WebViewSocketScanState.NOT_RUN
-        globalSocketSnapshots = emptyMap()
-        activeSnapshotSlot = null
-        repeatedSocketDiff = null
-        experimentClassification = null
-        socketScanMessage = null
-        mapsScanResult = null
-        mapsScanMessage = null
         commandProbeResults = emptyMap()
         devToolsStateHistory = emptyList()
         devToolsResult = null
         devToolsMessage = null
         devToolsProcessQueryStatus = "未查询"
-        clearCdpPhase4Result()
+        clearCdpProbeResult()
         probePort = null
         busy = true
         operationScope.launch {
@@ -389,19 +365,11 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             LocalAdbCommandKind.ID,
             CommandExecutorProbeResult(CommandExecutorProbeState.RUNNING, "正在连接并运行 id")
         )
-        socketScanState = WebViewSocketScanState.NOT_RUN
-        globalSocketSnapshots = emptyMap()
-        activeSnapshotSlot = null
-        repeatedSocketDiff = null
-        experimentClassification = null
-        socketScanMessage = null
-        mapsScanResult = null
-        mapsScanMessage = null
         devToolsStateHistory = emptyList()
         devToolsResult = null
         devToolsMessage = null
         devToolsProcessQueryStatus = "未查询"
-        clearCdpPhase4Result()
+        clearCdpProbeResult()
         busy = true
         operationScope.launch {
             try {
@@ -479,7 +447,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         devToolsResult = null
         devToolsMessage = null
         devToolsProcessQueryStatus = "未查询"
-        clearCdpPhase4Result()
+        clearCdpProbeResult()
         busy = true
         operationScope.launch {
             fun recordState(state: DevToolsDiscoveryState) {
@@ -498,11 +466,11 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 val unixResult = if (unixOutput.issue == LocalAdbReadIssue.NONE &&
                     unixOutput.commandCompleted && unixOutput.exitCode == 0
                 ) {
-                    parseGlobalUnixSocketTable(unixOutput.output, unixOutput.exitCode)
+                    parseNamedUnixSockets(unixOutput.output, unixOutput.exitCode)
                 } else {
-                    GlobalUnixSocketTableResult(ProcUnixScanState.PROC_UNIX_FAILED, null, emptyList())
+                    NamedUnixSocketReadResult(successful = false, sockets = emptyList())
                 }
-                if (unixResult.state != ProcUnixScanState.PROC_UNIX_SUCCESS) {
+                if (!unixResult.successful) {
                     recordState(DevToolsDiscoveryState.DEVTOOLS_SOCKET_SCAN_FAILED)
                     shellState = SHELL_OPENED
                     devToolsMessage = unixOutput.failureSummary
@@ -514,23 +482,22 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 recordState(DevToolsDiscoveryState.DEVTOOLS_SOCKET_SCAN_SUCCESS)
 
                 val processOutput = client.executeReadOnly(LocalAdbReadOnlyCommand.PROCESS_QUERY)
-                val processResult = if (processOutput.issue == LocalAdbReadIssue.NONE &&
+                val processes = if (processOutput.issue == LocalAdbReadIssue.NONE &&
                     processOutput.commandCompleted && processOutput.exitCode == 0
                 ) {
-                    parseProcessQuery(processOutput.output, processOutput.exitCode)
+                    parseWeWorkProcessList(processOutput.output, processOutput.exitCode)
+                } else null
+                devToolsProcessQueryStatus = if (processes != null) {
+                    "PROCESS_QUERY_SUCCESS · ${processes.size} 个企业微信进程"
                 } else {
-                    ProcessQueryResult(ProcessQueryScanState.PROCESS_QUERY_FAILED, emptyList())
-                }
-                devToolsProcessQueryStatus = when (processResult.state) {
-                    ProcessQueryScanState.PROCESS_QUERY_SUCCESS -> "PROCESS_QUERY_SUCCESS · ${processResult.processes.size} 个企业微信进程"
-                    else -> "PROCESS_QUERY_FAILED · socket PID 无法关联进程"
+                    "PROCESS_QUERY_FAILED · socket PID 无法关联进程"
                 }
                 shellState = SHELL_OPENED
 
                 devToolsResult = discoverDevToolsTargets(
                     client = client,
                     candidates = candidates,
-                    processes = processResult.processes,
+                    processes = processes.orEmpty(),
                     onState = ::recordState
                 )
                 devToolsMessage = when (devToolsResult?.finalState) {
@@ -591,7 +558,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             return
         }
 
-        clearCdpPhase4Result()
+        clearCdpProbeResult()
         cdpHttpTargetUrl = target.displayUrl
         cdpWebSocketState = "CONNECTING"
         cdpCommandState = "CDP_CONNECT_START"
@@ -1113,7 +1080,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         networkListenerJob = listenerJob
     }
 
-    fun runExecutorProbe(command: LocalAdbReadOnlyCommand, summarize: (String) -> String?) {
+    fun runExecutorProbe(command: LocalAdbReadOnlyCommand, summarize: (String, Int?) -> String?) {
         if (busy) return
         val port = connectPort.toIntOrNull()
         if (port == null || port !in 1..65535) {
@@ -1145,7 +1112,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     val detail = if (printfAnalysis != null) {
                         if (printfAnalysis.succeeded) "printf test 输出正确" else null
                     } else {
-                        summarize(result.output)
+                        summarize(result.output, result.exitCode)
                     }
                     if (result.exitCode != 0 || detail == null) {
                         recordCommandProbe(command.kind, CommandExecutorProbeResult(
@@ -1163,211 +1130,6 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 throw cancelled
             } catch (exception: Exception) {
                 recordCommandProbe(command.kind, CommandExecutorProbeResult(CommandExecutorProbeState.FAILED, safeFailure(exception)))
-            } finally {
-                busy = false
-            }
-        }
-    }
-
-    fun recordGlobalSnapshot(slot: GlobalSocketSnapshotSlot) {
-        if (busy) return
-        if (!uidVerified) {
-            socketScanMessage = "请先运行 id 并验证 UID 2000，再记录全局 socket。"
-            socketScanState = WebViewSocketScanState.SCAN_FAILED
-            return
-        }
-        val port = connectPort.toIntOrNull()
-        if (port == null || port !in 1..65535) {
-            socketScanMessage = "请输入 Wireless Debugging 主页面显示的有效连接端口。"
-            connectionState = ADB_CONNECTION_FAILED
-            socketScanState = WebViewSocketScanState.SCAN_FAILED
-            return
-        }
-
-        val orderedSlots = GlobalSocketSnapshotSlot.values().toList()
-        val slotIndex = orderedSlots.indexOf(slot)
-        val previousSlot = orderedSlots.getOrNull(slotIndex - 1)
-        if (previousSlot != null &&
-            globalSocketSnapshots[previousSlot]?.procUnixState != ProcUnixScanState.PROC_UNIX_SUCCESS
-        ) {
-            socketScanMessage = "请先成功记录 ${previousSlot.label}。"
-            socketScanState = WebViewSocketScanState.SCAN_FAILED
-            return
-        }
-
-        val invalidatedSlots = orderedSlots.drop(slotIndex)
-        globalSocketSnapshots = globalSocketSnapshots - invalidatedSlots.toSet()
-        repeatedSocketDiff = null
-        experimentClassification = null
-        mapsScanResult = null
-        mapsScanMessage = null
-        socketScanMessage = null
-        lastError = null
-        activeSnapshotSlot = slot
-        socketScanState = WebViewSocketScanState.SCANNING
-        connectionState = ADB_CONNECTING
-        busy = true
-
-        operationScope.launch {
-            try {
-                if (!client.connect(port)) throw IOException("TLS connection was not established")
-                connectionState = ADB_CONNECTED
-                shellState = SHELL_OPENING
-
-                suspend fun runCommand(command: LocalAdbReadOnlyCommand): Pair<LocalAdbCommandOutput?, String?> {
-                    val result = try {
-                        client.executeReadOnly(command)
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (exception: Exception) {
-                        return null to safeFailure(exception)
-                    }
-                    val failure = when {
-                        result.issue != LocalAdbReadIssue.NONE -> result.failureSummary
-                            ?: "${command.kind.safeLabel} 未完成；是否收到部分输出：${result.partialOutputReceived}"
-                        !result.commandCompleted -> "${command.kind.safeLabel} 未收到结束标记；是否收到部分输出：${result.partialOutputReceived}"
-                        result.exitCode != 0 -> "${command.kind.safeLabel} 退出状态为 ${result.exitCode}"
-                        else -> null
-                    }
-                    return if (failure == null) result to null else null to failure
-                }
-
-                val (unixOutput, unixFailure) = runCommand(LocalAdbReadOnlyCommand.PROC_UNIX_READ)
-                val unixResult = unixOutput?.let { parseGlobalUnixSocketTable(it.output, it.exitCode) }
-                    ?: GlobalUnixSocketTableResult(ProcUnixScanState.PROC_UNIX_FAILED, null, emptyList())
-                val normalizedUnixFailure = when {
-                    unixFailure != null -> unixFailure
-                    unixResult.state == ProcUnixScanState.PROC_UNIX_FAILED -> "未找到有效的 /proc/net/unix 表头或具名 socket 数据。"
-                    else -> null
-                }
-
-                val (processOutput, processFailure) = runCommand(LocalAdbReadOnlyCommand.PROCESS_QUERY)
-                val processResult = processOutput?.let { parseProcessQuery(it.output, it.exitCode) }
-                    ?: ProcessQueryResult(ProcessQueryScanState.PROCESS_QUERY_FAILED, emptyList())
-                val normalizedProcessFailure = when {
-                    processFailure != null -> processFailure
-                    processResult.state == ProcessQueryScanState.PROCESS_QUERY_FAILED -> "企业微信进程查询没有返回有效结果。"
-                    else -> null
-                }
-                shellState = SHELL_OPENED
-
-                globalSocketSnapshots = globalSocketSnapshots + (slot to GlobalSocketSnapshot(
-                    stats = unixResult.stats,
-                    sockets = unixResult.sockets,
-                    processes = processResult.processes,
-                    procUnixState = unixResult.state,
-                    processQueryState = processResult.state,
-                    procUnixFailure = normalizedUnixFailure,
-                    processQueryFailure = normalizedProcessFailure
-                ))
-                socketScanState = if (unixResult.state == ProcUnixScanState.PROC_UNIX_SUCCESS) {
-                    WebViewSocketScanState.SNAPSHOT_RECORDED
-                } else {
-                    WebViewSocketScanState.SCAN_FAILED
-                }
-                socketScanMessage = listOfNotNull(
-                    normalizedUnixFailure?.let { "${slot.name} PROC_UNIX_READ_FAILED：$it" },
-                    normalizedProcessFailure?.let { "${slot.name} PROCESS_QUERY_FAILED：$it" }
-                ).joinToString(" · ").ifBlank { null }
-                lastError = socketScanMessage
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (exception: Exception) {
-                if (connectionState == ADB_CONNECTING) connectionState = ADB_CONNECTION_FAILED
-                if (shellState == SHELL_OPENING) shellState = SHELL_FAILED
-                socketScanState = WebViewSocketScanState.SCAN_FAILED
-                socketScanMessage = "${slot.name}：${safeFailure(exception)}"
-                lastError = socketScanMessage
-            } finally {
-                activeSnapshotSlot = null
-                busy = false
-            }
-        }
-    }
-
-    fun calculateRepeatedSocketDiff() {
-        val ordered = GlobalSocketSnapshotSlot.values().mapNotNull(globalSocketSnapshots::get)
-        if (ordered.size != GlobalSocketSnapshotSlot.values().size) {
-            socketScanMessage = "请先依次完成 A1、B1、A2、B2 四次快照。"
-            socketScanState = WebViewSocketScanState.SCAN_FAILED
-            return
-        }
-        if (!canCompareGlobalSocketSnapshots(ordered)) {
-            repeatedSocketDiff = null
-            experimentClassification = GlobalSocketExperimentClassification.PROC_UNIX_READ_FAILED
-            socketScanState = WebViewSocketScanState.DIFF_COMPLETE
-            socketScanMessage = "至少一次 /proc/net/unix 读取失败；差分结果不可判定，请重做失败快照。"
-            return
-        }
-
-        val diff = repeatedSocketDiff(
-            a1 = ordered[0].sockets,
-            b1 = ordered[1].sockets,
-            a2 = ordered[2].sockets,
-            b2 = ordered[3].sockets
-        )
-        repeatedSocketDiff = diff
-        experimentClassification = classifyGlobalSocketExperiment(ordered, diff)
-        socketScanState = WebViewSocketScanState.DIFF_COMPLETE
-        socketScanMessage = null
-    }
-
-    fun scanWxaContainerMaps() {
-        if (busy) return
-        val port = connectPort.toIntOrNull()
-        if (port == null || port !in 1..65535) {
-            mapsScanMessage = "请输入 Wireless Debugging 主页面显示的有效连接端口。"
-            return
-        }
-        val candidate = GlobalSocketSnapshotSlot.values().reversed()
-            .asSequence()
-            .mapNotNull(globalSocketSnapshots::get)
-            .filter { it.processQueryState == ProcessQueryScanState.PROCESS_QUERY_SUCCESS }
-            .flatMap { it.processes.asSequence() }
-            .firstOrNull { it.processName == "com.tencent.wework:wxa_container0" }
-        if (candidate == null) {
-            mapsScanResult = null
-            mapsScanMessage = "最近一次成功的企业微信进程查询未发现 wxa_container0；请先记录一组进程快照。"
-            return
-        }
-
-        mapsScanResult = ProcMapsScanResult(candidate.pid, ProcMapsScanState.MAPS_SCAN_START, emptyList())
-        mapsScanMessage = "正在只读检查 wxa_container0 的筛选库名。"
-        lastError = null
-        busy = true
-        operationScope.launch {
-            try {
-                if (!client.connect(port)) throw IOException("TLS connection was not established")
-                connectionState = ADB_CONNECTED
-                shellState = SHELL_OPENING
-                val commandResult = client.executeReadOnly(LocalAdbReadOnlyCommand.mapsScan(candidate.pid))
-                shellState = SHELL_OPENED
-                val failure = when {
-                    commandResult.issue != LocalAdbReadIssue.NONE -> commandResult.failureSummary
-                        ?: "maps 命令未完成。"
-                    !commandResult.commandCompleted -> "maps 命令未收到结束标记。"
-                    commandResult.exitCode != 0 -> "maps 命令退出状态为 ${commandResult.exitCode}。"
-                    else -> null
-                }
-                if (failure != null) {
-                    mapsScanResult = ProcMapsScanResult(candidate.pid, ProcMapsScanState.MAPS_SCAN_FAILED, emptyList())
-                    mapsScanMessage = "MAPS_SCAN_FAILED：$failure"
-                    return@launch
-                }
-
-                val result = parseProcMapsScan(commandResult.output, candidate.pid, commandResult.exitCode)
-                mapsScanResult = result
-                mapsScanMessage = when (result.state) {
-                    ProcMapsScanState.MAPS_SCAN_SUCCESS -> "读取成功；仅保留匹配关键词的库 basename。"
-                    ProcMapsScanState.MAPS_SCAN_PERMISSION_DENIED -> "MAPS_PERMISSION_DENIED；已停止该项检查。"
-                    else -> "MAPS_SCAN_FAILED：未收到有效扫描结果标记。"
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (exception: Exception) {
-                if (shellState == SHELL_OPENING) shellState = SHELL_FAILED
-                mapsScanResult = ProcMapsScanResult(candidate.pid, ProcMapsScanState.MAPS_SCAN_FAILED, emptyList())
-                mapsScanMessage = "MAPS_SCAN_FAILED：${safeFailure(exception)}"
             } finally {
                 busy = false
             }
@@ -1898,7 +1660,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 PillButton(
                     if (busy && commandProbe.state == CommandExecutorProbeState.RUNNING) "命令验证中…" else "验证 printf test",
                     onClick = {
-                        runExecutorProbe(LocalAdbReadOnlyCommand.PRINTF_TEST) { output ->
+                        runExecutorProbe(LocalAdbReadOnlyCommand.PRINTF_TEST) { output, _ ->
                             if (output == "test") {
                                 "printf test 输出正确"
                             } else {
@@ -1911,9 +1673,9 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 PillButton(
                     "验证 /proc/net/unix 读取",
                     onClick = {
-                        runExecutorProbe(LocalAdbReadOnlyCommand.PROC_UNIX_READ) { output ->
-                            val result = parseProcUnixTable(output, exitCode = 0)
-                            result.stats?.let { "读取成功 · ${it.totalLines} 行" }
+                    runExecutorProbe(LocalAdbReadOnlyCommand.PROC_UNIX_READ) { output, exitCode ->
+                            val result = parseNamedUnixSockets(output, exitCode)
+                            if (result.successful) "读取成功 · ${output.lineSequence().count()} 行" else null
                         }
                     },
                     style = PillStyle.Secondary
@@ -1921,13 +1683,8 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 PillButton(
                     "验证不存在的进程查询",
                     onClick = {
-                        runExecutorProbe(LocalAdbReadOnlyCommand.MISSING_PROCESS_QUERY) { output ->
-                            val result = parseProcessQueryForPackage(
-                                output,
-                                exitCode = 0,
-                                packageName = "com.burgess.schedule.__localadb_absent_probe__"
-                            )
-                            if (result.state == ProcessQueryScanState.PROCESS_QUERY_SUCCESS && result.processes.isEmpty()) {
+                        runExecutorProbe(LocalAdbReadOnlyCommand.MISSING_PROCESS_QUERY) { output, exitCode ->
+                            if (isEmptyMissingProcessQueryOutput(output, exitCode)) {
                                 "查询完成 · 匹配 0 个进程"
                             } else {
                                 null
@@ -1944,162 +1701,11 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                     LocalAdbCommandKind.ID,
                     DebugLocalAdbCommandKind.PRINTF_TEST,
                     LocalAdbCommandKind.PROC_UNIX_READ,
-                    LocalAdbCommandKind.MISSING_PROCESS_QUERY
+                    DebugLocalAdbCommandKind.MISSING_PROCESS_QUERY
                 ).forEach { kind ->
                     val status = commandProbeResults[kind]?.state?.name ?: "NOT_RUN"
                     Text("${kind.safeLabel}：$status", style = AppType.caption, color = if (status == CommandExecutorProbeState.FAILED.name) colors.danger else colors.mut)
                 }
-            }
-        }
-
-        SectionLabel("步骤 3 · 全局 Unix socket 重复 A/B")
-        AppCard(Modifier.fillMaxWidth()) {
-            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
-                Text(
-                    "每次只读保存 /proc/net/unix 中所有具名 socket，以及 com.tencent.wework 进程名称和 PID。不会读取进程 fd、连接 socket 或保存到设备。",
-                    style = AppType.body,
-                    color = colors.ink
-                )
-                Text(
-                    "轮内差分按 inode 和 socket 字段判断；跨轮稳定项按名称、类型、状态和 abstract 属性匹配，并保留两轮 inode。",
-                    style = AppType.caption,
-                    color = colors.mut
-                )
-                GlobalSocketSnapshotSlot.values().forEach { slot ->
-                    PillButton(
-                        if (busy && activeSnapshotSlot == slot) "${slot.label} 扫描中…" else "记录 ${slot.label}",
-                        onClick = { recordGlobalSnapshot(slot) },
-                        style = PillStyle.Secondary
-                    )
-                    globalSocketSnapshots[slot]?.let { snapshot -> GlobalSocketSnapshotSummary(slot, snapshot) }
-                }
-                Text("扫描状态：${socketScanState.name}", style = AppType.caption, color = colors.mut)
-                socketScanMessage?.let { Text(it, style = AppType.caption, color = colors.danger) }
-                PillButton("计算稳定差分", onClick = ::calculateRepeatedSocketDiff, style = PillStyle.Primary)
-                Text("实验分类：${experimentClassification?.name ?: "待计算"}", style = AppType.caption, color = colors.ink)
-
-                repeatedSocketDiff?.let { diff ->
-                    val a1 = globalSocketSnapshots[GlobalSocketSnapshotSlot.A1]
-                    val b1 = globalSocketSnapshots[GlobalSocketSnapshotSlot.B1]
-                    val a2 = globalSocketSnapshots[GlobalSocketSnapshotSlot.A2]
-                    val b2 = globalSocketSnapshots[GlobalSocketSnapshotSlot.B2]
-
-                    Text("B1 − A1 新增：${diff.firstCycle.added.size} · A1 − B1 消失：${diff.firstCycle.removed.size}", style = AppType.caption, color = colors.ink)
-                    diff.firstCycle.added.forEach { socket ->
-                        GlobalSocketEntryLine(
-                            "第 1 轮新增",
-                            socket,
-                            b1?.processes.orEmpty(),
-                            b1?.processQueryState == ProcessQueryScanState.PROCESS_QUERY_SUCCESS
-                        )
-                    }
-                    diff.firstCycle.removed.forEach { socket ->
-                        GlobalSocketEntryLine(
-                            "第 1 轮消失",
-                            socket,
-                            a1?.processes.orEmpty(),
-                            a1?.processQueryState == ProcessQueryScanState.PROCESS_QUERY_SUCCESS
-                        )
-                    }
-                    WeWorkProcessDeltaSummary(
-                        "第 1 轮企业微信进程变化",
-                        a1?.let { before -> b1?.let { after ->
-                            diffWeWorkProcesses(before.processQueryState, before.processes, after.processQueryState, after.processes)
-                        } }
-                    )
-
-                    Text("B2 − A2 新增：${diff.secondCycle.added.size} · A2 − B2 消失：${diff.secondCycle.removed.size}", style = AppType.caption, color = colors.ink)
-                    diff.secondCycle.added.forEach { socket ->
-                        GlobalSocketEntryLine(
-                            "第 2 轮新增",
-                            socket,
-                            b2?.processes.orEmpty(),
-                            b2?.processQueryState == ProcessQueryScanState.PROCESS_QUERY_SUCCESS
-                        )
-                    }
-                    diff.secondCycle.removed.forEach { socket ->
-                        GlobalSocketEntryLine(
-                            "第 2 轮消失",
-                            socket,
-                            a2?.processes.orEmpty(),
-                            a2?.processQueryState == ProcessQueryScanState.PROCESS_QUERY_SUCCESS
-                        )
-                    }
-                    WeWorkProcessDeltaSummary(
-                        "第 2 轮企业微信进程变化",
-                        a2?.let { before -> b2?.let { after ->
-                            diffWeWorkProcesses(before.processQueryState, before.processes, after.processQueryState, after.processes)
-                        } }
-                    )
-
-                    Text("稳定新增 socket：${diff.stableAdded.size} · 单轮新增（随机噪声候选）：${diff.randomAddedCount}", style = AppType.caption, color = colors.ink)
-                    diff.stableAdded.forEach { addition ->
-                        val categories = classifyGlobalSocketName(addition.firstCycle.socketName).joinToString(" · ") { it.label }
-                        val pidMatch = socketNameMatchesWeWorkPid(addition.firstCycle.socketName, b1?.processes.orEmpty()) ||
-                            socketNameMatchesWeWorkPid(addition.secondCycle.socketName, b2?.processes.orEmpty())
-                        val pidCorrelation = when {
-                            pidMatch -> "NAME_PID_MATCH"
-                            b1?.processQueryState != ProcessQueryScanState.PROCESS_QUERY_SUCCESS ||
-                                b2?.processQueryState != ProcessQueryScanState.PROCESS_QUERY_SUCCESS -> "PID 对照不可用"
-                            else -> "未匹配当前企业微信 PID"
-                        }
-                        SectionLabel("稳定新增 · $categories · $pidCorrelation")
-                        GlobalSocketEntryLine(
-                            "第 1 轮",
-                            addition.firstCycle,
-                            b1?.processes.orEmpty(),
-                            b1?.processQueryState == ProcessQueryScanState.PROCESS_QUERY_SUCCESS
-                        )
-                        GlobalSocketEntryLine(
-                            "第 2 轮",
-                            addition.secondCycle,
-                            b2?.processes.orEmpty(),
-                            b2?.processQueryState == ProcessQueryScanState.PROCESS_QUERY_SUCCESS
-                        )
-                    }
-                    diff.randomAddedFirstCycle.forEach { socket ->
-                        GlobalSocketEntryLine(
-                            "仅第 1 轮新增",
-                            socket,
-                            b1?.processes.orEmpty(),
-                            b1?.processQueryState == ProcessQueryScanState.PROCESS_QUERY_SUCCESS
-                        )
-                    }
-                    diff.randomAddedSecondCycle.forEach { socket ->
-                        GlobalSocketEntryLine(
-                            "仅第 2 轮新增",
-                            socket,
-                            b2?.processes.orEmpty(),
-                            b2?.processQueryState == ProcessQueryScanState.PROCESS_QUERY_SUCCESS
-                        )
-                    }
-                }
-            }
-        }
-
-        SectionLabel("独立检查 · wxa_container0 内核库")
-        AppCard(Modifier.fillMaxWidth()) {
-            Column(verticalArrangement = Arrangement.spacedBy(AppSpace.gap)) {
-                Text(
-                    "仅在点击后读取最近快照中的 com.tencent.wework:wxa_container0 maps；界面只显示匹配关键词的库 basename。",
-                    style = AppType.body,
-                    color = colors.ink
-                )
-                PillButton(
-                    if (busy && mapsScanResult?.state == ProcMapsScanState.MAPS_SCAN_START) "检查中…" else "检查 wxa_container0 maps",
-                    onClick = ::scanWxaContainerMaps,
-                    style = PillStyle.Secondary
-                )
-                mapsScanResult?.let { result ->
-                    Text("PID ${result.pid} · ${result.state.name}", style = AppType.caption, color = if (result.state == ProcMapsScanState.MAPS_SCAN_PERMISSION_DENIED || result.state == ProcMapsScanState.MAPS_SCAN_FAILED) colors.danger else colors.ink)
-                    result.libraries.forEach { library ->
-                        Text("${library.basename} · ${library.keywords.joinToString()}", style = AppType.caption, color = colors.ink)
-                    }
-                    if (result.state == ProcMapsScanState.MAPS_SCAN_SUCCESS) {
-                        Text("内核线索：${identifyWebViewKernel(result.libraries).displayName}", style = AppType.caption, color = colors.mut)
-                    }
-                }
-                mapsScanMessage?.let { Text(it, style = AppType.caption, color = if (mapsScanResult?.state == ProcMapsScanState.MAPS_SCAN_PERMISSION_DENIED || mapsScanResult?.state == ProcMapsScanState.MAPS_SCAN_FAILED) colors.danger else colors.mut) }
             }
         }
 
@@ -2477,69 +2083,4 @@ private fun schoolWarningLabel(warning: SchoolParseWarning): String = when (warn
     SchoolParseWarning.NON_OBJECT_RULE -> "存在非课程对象项"
     SchoolParseWarning.SECTION_OUT_OF_APP_RANGE -> "超出 App 当前 8 节范围"
     SchoolParseWarning.IMPORT_DEFAULT -> "使用预览默认值"
-}
-
-@Composable
-private fun GlobalSocketSnapshotSummary(slot: GlobalSocketSnapshotSlot, snapshot: GlobalSocketSnapshot) {
-    val colors = LocalAppColors.current
-    SectionLabel(slot.label)
-    Text("PROC_UNIX：${snapshot.procUnixState.name}", style = AppType.caption, color = if (snapshot.procUnixState == ProcUnixScanState.PROC_UNIX_FAILED) colors.danger else colors.ink)
-    snapshot.stats?.let { stats ->
-        Text("/proc/net/unix：${stats.totalLines} 行 · 具名 ${stats.namedSockets} · abstract ${stats.abstractSockets}", style = AppType.caption, color = colors.mut)
-    }
-    snapshot.procUnixFailure?.let { Text(it, style = AppType.caption, color = colors.danger) }
-    Text("PROCESS_QUERY：${snapshot.processQueryState.name}", style = AppType.caption, color = if (snapshot.processQueryState == ProcessQueryScanState.PROCESS_QUERY_FAILED) colors.danger else colors.ink)
-    snapshot.processQueryFailure?.let { Text(it, style = AppType.caption, color = colors.danger) }
-    when {
-        snapshot.processQueryState != ProcessQueryScanState.PROCESS_QUERY_SUCCESS -> Unit
-        snapshot.processes.isEmpty() -> Text("未发现 com.tencent.wework 进程。", style = AppType.caption, color = colors.mut)
-        else -> {
-            Text("企业微信相关进程：${snapshot.processes.size}", style = AppType.caption, color = colors.ink)
-            snapshot.processes.forEach { process ->
-                Text("PID ${process.pid} · ${process.processName}", style = AppType.caption, color = colors.ink)
-            }
-        }
-    }
-}
-
-@Composable
-private fun GlobalSocketEntryLine(
-    label: String,
-    socket: NamedUnixSocket,
-    processes: List<WeWorkProcess>,
-    processQuerySucceeded: Boolean
-) {
-    val colors = LocalAppColors.current
-    val suffix = pidStyleSuffix(socket.socketName)
-    val pidMatch = socketNameMatchesWeWorkPid(socket.socketName, processes)
-    val categories = classifyGlobalSocketName(socket.socketName).joinToString(" · ") { it.label }
-    val endpoint = if (socket.isAbstract) "abstract" else "filesystem"
-    val suffixLabel = suffix?.toString() ?: "无数字 PID 样式后缀"
-    val pidMatchLabel = when {
-        pidMatch -> "NAME_PID_MATCH"
-        !processQuerySucceeded -> "PID 对照不可用"
-        else -> "无 PID 匹配"
-    }
-    Text(
-        "$label · $categories · $endpoint · type=0x${socket.type.toString(16).uppercase().padStart(4, '0')} · state=0x${socket.state.toString(16).uppercase().padStart(2, '0')} · inode=${socket.inode} · PID 后缀=$suffixLabel · $pidMatchLabel · ${socket.socketName}",
-        style = AppType.caption,
-        color = colors.ink
-    )
-}
-
-@Composable
-private fun WeWorkProcessDeltaSummary(title: String, delta: WeWorkProcessDelta?) {
-    val colors = LocalAppColors.current
-    SectionLabel(title)
-    if (delta == null) {
-        Text("PROCESS_QUERY_FAILED · 进程差异不可判定。", style = AppType.caption, color = colors.danger)
-    } else {
-        Text("新增 ${delta.added.size} · 消失 ${delta.removed.size}", style = AppType.caption, color = colors.ink)
-        delta.added.forEach { process ->
-            Text("新增 PID ${process.pid} · ${process.processName}", style = AppType.caption, color = colors.ink)
-        }
-        delta.removed.forEach { process ->
-            Text("消失 PID ${process.pid} · ${process.processName}", style = AppType.caption, color = colors.mut)
-        }
-    }
 }

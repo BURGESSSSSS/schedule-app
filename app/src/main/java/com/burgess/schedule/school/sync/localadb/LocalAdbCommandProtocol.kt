@@ -23,8 +23,7 @@ internal interface LocalAdbCommandDescriptor {
 internal enum class LocalAdbCommandKind(override val safeLabel: String) : LocalAdbCommandDescriptor {
     ID("id"),
     PROC_UNIX_READ("cat /proc/net/unix"),
-    PROCESS_QUERY("ps process query"),
-    MISSING_PROCESS_QUERY("ps absent-package query")
+    PROCESS_QUERY("ps process query")
 }
 
 internal data class LocalAdbReadOnlyCommand(
@@ -49,12 +48,6 @@ internal data class LocalAdbReadOnlyCommand(
             "ps -A -o PID,NAME 2>/dev/null | awk 'NR == 1 || \$2 == \"com.tencent.wework\" || index(\$2, \"com.tencent.wework:\") == 1'",
             outputLimit = 96 * 1024
         )
-        val MISSING_PROCESS_QUERY = LocalAdbReadOnlyCommand(
-            LocalAdbCommandKind.MISSING_PROCESS_QUERY,
-            "ps -A -o PID,NAME 2>/dev/null | awk 'NR == 1 || \$2 == \"com.burgess.schedule.__localadb_absent_probe__\" || index(\$2, \"com.burgess.schedule.__localadb_absent_probe__:\") == 1'",
-            outputLimit = 96 * 1024
-        )
-
     }
 }
 

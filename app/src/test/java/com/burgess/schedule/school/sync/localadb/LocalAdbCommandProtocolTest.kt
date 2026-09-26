@@ -95,7 +95,7 @@ class LocalAdbCommandProtocolTest {
 
     @Test
     fun emptyPayloadParsesSuccessfully() {
-        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.MISSING_PROCESS_QUERY, FRAME_ID)
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PROCESS_QUERY, FRAME_ID)
         val result = collect(frame("", wrapped), wrapped)
 
         assertEquals("", result.output)
@@ -162,7 +162,7 @@ class LocalAdbCommandProtocolTest {
 
     @Test
     fun wrapperIsOnePhysicalShellLineWithMatchingRandomMarkers() {
-        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.mapsScan(12345), FRAME_ID)
+        val wrapped = wrapWithCommandFrame(LocalAdbReadOnlyCommand.PROC_UNIX_READ, FRAME_ID)
 
         assertEquals(1, wrapped.input.count { it == '\n' })
         assertTrue(wrapped.input.startsWith("{ printf '\\n${wrapped.beginMarker}\\n'; eval \"\$(printf '%b' "))

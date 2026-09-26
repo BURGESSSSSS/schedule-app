@@ -57,4 +57,12 @@ class LocalAdbProbeOutputTest {
         assertTrue(diagnostic.contains("shell 提示符=true"))
         assertTrue(result.hasBareCr)
     }
+
+    @Test
+    fun acceptsMissingProcessProbeOnlyWhenTheHeaderIsTheOnlyRow() {
+        assertTrue(isEmptyMissingProcessQueryOutput("PID NAME\n", exitCode = 0))
+        assertFalse(isEmptyMissingProcessQueryOutput("PID NAME\n123 com.example.app\n", exitCode = 0))
+        assertFalse(isEmptyMissingProcessQueryOutput("invalid output\n", exitCode = 0))
+        assertFalse(isEmptyMissingProcessQueryOutput("PID NAME\n", exitCode = 1))
+    }
 }
