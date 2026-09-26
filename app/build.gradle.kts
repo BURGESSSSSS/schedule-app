@@ -80,6 +80,10 @@ android {
             optimization {
                 enable = true
             }
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             } else {
@@ -94,9 +98,6 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
-        // AGP's AIDL dependency parser cannot decode this project's Chinese path on Windows.
-        // IUserService.java is generated from the checked-in AIDL contract with build-tools 36.
-        aidl = false
     }
 }
 
@@ -112,8 +113,6 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     implementation(libs.google.mlkit.text.recognition.chinese)
-    implementation(libs.shizuku.api)
-    implementation(libs.shizuku.provider)
     implementation(libs.libadb.android)
     implementation(libs.sun.security.android)
     implementation(libs.conscrypt.android)

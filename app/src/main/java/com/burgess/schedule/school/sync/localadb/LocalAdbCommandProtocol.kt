@@ -16,18 +16,19 @@ internal enum class LocalAdbReadIssue {
     IO_ERROR
 }
 
-internal enum class LocalAdbCommandKind(val safeLabel: String) {
+internal interface LocalAdbCommandDescriptor {
+    val safeLabel: String
+}
+
+internal enum class LocalAdbCommandKind(override val safeLabel: String) : LocalAdbCommandDescriptor {
     ID("id"),
-    PRINTF_TEST("printf test"),
     PROC_UNIX_READ("cat /proc/net/unix"),
     PROCESS_QUERY("ps process query"),
-    MISSING_PROCESS_QUERY("ps absent-package query"),
-    FD_SCAN("/proc/PID/fd scan"),
-    MAPS_SCAN("filtered /proc/PID/maps scan")
+    MISSING_PROCESS_QUERY("ps absent-package query")
 }
 
 internal data class LocalAdbReadOnlyCommand(
-    val kind: LocalAdbCommandKind,
+    val kind: LocalAdbCommandDescriptor,
     val shellCommand: String,
     val outputLimit: Int = DEFAULT_OUTPUT_LIMIT_BYTES,
     val timeoutMs: Long = COMMAND_TIMEOUT_MS,
@@ -38,11 +39,6 @@ internal data class LocalAdbReadOnlyCommand(
 
     companion object {
         val ID = LocalAdbReadOnlyCommand(LocalAdbCommandKind.ID, "id", outputLimit = 1024)
-        val PRINTF_TEST = LocalAdbReadOnlyCommand(
-            LocalAdbCommandKind.PRINTF_TEST,
-            "printf test",
-            outputLimit = 1024
-        )
         val PROC_UNIX_READ = LocalAdbReadOnlyCommand(
             LocalAdbCommandKind.PROC_UNIX_READ,
             "cat /proc/net/unix 2>/dev/null",
@@ -59,31 +55,6 @@ internal data class LocalAdbReadOnlyCommand(
             outputLimit = 96 * 1024
         )
 
-        fun fdScan(pid: Int): LocalAdbReadOnlyCommand {
-            require(pid > 0) { "PID must be positive" }
-            val command = FD_SCAN_SCRIPT
-                .replace("@@PID@@", pid.toString())
-                .replace('§', '$')
-            return LocalAdbReadOnlyCommand(
-                kind = LocalAdbCommandKind.FD_SCAN,
-                shellCommand = command,
-                outputLimit = 32 * 1024,
-                targetPid = pid
-            )
-        }
-
-        fun mapsScan(pid: Int): LocalAdbReadOnlyCommand {
-            require(pid > 0) { "PID must be positive" }
-            val command = MAPS_SCAN_SCRIPT
-                .replace("@@PID@@", pid.toString())
-                .replace('§', '$')
-            return LocalAdbReadOnlyCommand(
-                kind = LocalAdbCommandKind.MAPS_SCAN,
-                shellCommand = command,
-                outputLimit = 16 * 1024,
-                targetPid = pid
-            )
-        }
     }
 }
 
@@ -91,7 +62,7 @@ internal data class LocalAdbCommandOutput(
     val output: String,
     val issue: LocalAdbReadIssue,
     val failureSummary: String?,
-    val commandKind: LocalAdbCommandKind,
+    val commandKind: LocalAdbCommandDescriptor,
     val commandCompleted: Boolean,
     val exitCode: Int?,
     val partialOutputReceived: Boolean
@@ -228,92 +199,3 @@ internal data class WrappedCommandFrame(
 
 private const val DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024
 private const val COMMAND_TIMEOUT_MS = 5_000L
-
-private val FD_SCAN_SCRIPT = """
-if [ ! -d "/proc/@@PID@@/fd" ]; then
-  printf '__FD_SCAN_FAILED__|@@PID@@|PROCESS_GONE\n'
-elif ! ls "/proc/@@PID@@/fd" >/dev/null 2>&1; then
-  if [ ! -d "/proc/@@PID@@/fd" ]; then
-    printf '__FD_SCAN_FAILED__|@@PID@@|PROCESS_GONE\n'
-  else
-    printf '__FD_SCAN_PERMISSION_DENIED__|@@PID@@\n'
-  fi
-else
-  fd_permission_denied=0
-  fd_scan_failed=0
-  for fd_path in /proc/@@PID@@/fd/*; do
-    [ -e "§fd_path" ] || [ -L "§fd_path" ] || continue
-    target_result="$(readlink "§fd_path" 2>&1)"
-    readlink_status=$?
-    if [ "§readlink_status" -ne 0 ]; then
-      case "§target_result" in
-        *"Permission denied"*) fd_permission_denied=1 ;;
-        *"No such file"*) ;;
-        *) fd_scan_failed=1 ;;
-      esac
-      continue
-    fi
-    target="§target_result"
-    case "§target" in
-      socket:\[*\])
-        inode="§{target#socket:}"
-        inode="§{inode#\[}"
-        inode="§{inode%\]}"
-        case "§inode" in *[!0-9]*|'') continue ;; esac
-        printf '__FD_SOCKET__|@@PID@@|%s|socket:[%s]\n' "§{fd_path##*/}" "§inode"
-        ;;
-    esac
-  done
-  if [ ! -d "/proc/@@PID@@/fd" ]; then
-    printf '__FD_SCAN_FAILED__|@@PID@@|PROCESS_GONE\n'
-  elif [ "§fd_permission_denied" -ne 0 ]; then
-    printf '__FD_SCAN_PERMISSION_DENIED__|@@PID@@\n'
-  elif [ "§fd_scan_failed" -ne 0 ]; then
-    printf '__FD_SCAN_FAILED__|@@PID@@|READLINK_FAILED\n'
-  else
-    printf '__FD_SCAN_SUCCESS__|@@PID@@\n'
-  fi
-fi
-""".trimIndent()
-
-private val MAPS_SCAN_SCRIPT = """
-maps_file="/proc/@@PID@@/maps"
-if [ ! -r "§maps_file" ]; then
-  printf '__MAPS_SCAN_PERMISSION_DENIED__|@@PID@@\n'
-else
-  maps_result="$(awk -v pid=@@PID@@ '
-    {
-      path = ""
-      for (i = 6; i <= NF; i++) path = path (i == 6 ? "" : " ") §i
-      sub(/ \(deleted\)$/, "", path)
-      if (path !~ /^\//) next
-      count = split(path, parts, "/")
-      basename = parts[count]
-      lowered = tolower(basename)
-      keys = ""
-      if (lowered ~ /xweb/) keys = keys "xweb,"
-      if (lowered ~ /webview/) keys = keys "webview,"
-      if (lowered ~ /chromium/) keys = keys "chromium,"
-      if (lowered ~ /tbs/) keys = keys "tbs,"
-      if (lowered ~ /x5/) keys = keys "x5,"
-      if (keys != "") {
-        sub(/,$/, "", keys)
-        gsub(/[|[:cntrl:]]/, "?", basename)
-        printf "__WX_MAPS_LIBRARY__|%s|%s|%s\n", pid, basename, keys
-      }
-    }
-  ' "§maps_file" 2>&1)"
-  maps_status=$?
-  case "§maps_result" in
-    *"Permission denied"*) printf '__MAPS_SCAN_PERMISSION_DENIED__|@@PID@@\n' ;;
-    *)
-      printf '%s\n' "§maps_result" | awk '/^__WX_MAPS_LIBRARY__\|/'
-      if [ "§maps_status" -eq 0 ]; then
-        printf '__MAPS_SCAN_SUCCESS__|@@PID@@\n'
-      else
-        printf '__MAPS_SCAN_FAILED__|@@PID@@\n'
-      fi
-      ;;
-  esac
-fi
-""".trimIndent()

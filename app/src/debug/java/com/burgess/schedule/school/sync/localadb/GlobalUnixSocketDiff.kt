@@ -90,8 +90,6 @@ internal enum class GlobalSocketExperimentClassification {
 }
 
 private val UNIX_SOCKET_HEADER = Regex("^Num\\s+RefCount\\s+Protocol\\s+Flags\\s+Type\\s+St\\s+Inode(?:\\s+Path)?$", RegexOption.IGNORE_CASE)
-private val PID_STYLE_SUFFIX = Regex("(?:^|[^0-9])([0-9]{2,})$")
-
 internal fun parseGlobalUnixSocketTable(output: String, exitCode: Int?): GlobalUnixSocketTableResult {
     val lines = output.lineSequence().map { it.trimEnd('\r') }.filter(String::isNotBlank).toList()
     var headerFound = false
@@ -156,9 +154,6 @@ internal fun classifyGlobalSocketName(name: String): Set<GlobalSocketNameCategor
     if (categories.isEmpty()) categories += GlobalSocketNameCategory.OTHER
     return categories
 }
-
-internal fun pidStyleSuffix(socketName: String): Int? =
-    PID_STYLE_SUFFIX.find(socketName)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
 internal fun socketNameMatchesWeWorkPid(socketName: String, processes: List<WeWorkProcess>): Boolean {
     val suffix = pidStyleSuffix(socketName) ?: return false

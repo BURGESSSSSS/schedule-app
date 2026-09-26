@@ -205,7 +205,7 @@ private class LocalAdbConnectionManager(context: Context) : AbsAdbConnectionMana
 
     override fun getCertificate(): Certificate = identity.certificate
 
-    override fun getDeviceName(): String = "ScheduleLocalAdbPoC"
+    override fun getDeviceName(): String = "Schedule"
 }
 
 private data class LocalAdbIdentity(

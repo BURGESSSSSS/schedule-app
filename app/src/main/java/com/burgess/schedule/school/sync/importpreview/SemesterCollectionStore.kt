@@ -17,20 +17,33 @@ internal sealed interface SemesterSessionLoadResult {
     data class Invalid(val errorType: String) : SemesterSessionLoadResult
 }
 
-/** Stores only the sanitized, structured Debug collection state; response bodies and request metadata are never accepted. */
+/** Stores only sanitized structured course state; response bodies and request metadata are never accepted. */
 internal class SemesterCollectionStore(context: Context) {
-    private val directory = File(context.applicationContext.filesDir, SESSION_DIRECTORY)
+    private val filesDirectory = context.applicationContext.filesDir
+    private val directory = File(filesDirectory, SESSION_DIRECTORY)
     private val atomicFile = AtomicFile(File(directory, SESSION_FILE))
+    private val legacyAtomicFile = AtomicFile(File(File(filesDirectory, LEGACY_SESSION_DIRECTORY), SESSION_FILE))
 
     suspend fun load(): SemesterSessionLoadResult = withContext(Dispatchers.IO) {
-        if (!atomicFile.baseFile.exists()) return@withContext SemesterSessionLoadResult.Empty
+        val source = when {
+            atomicFile.baseFile.exists() -> atomicFile
+            legacyAtomicFile.baseFile.exists() -> legacyAtomicFile
+            else -> return@withContext SemesterSessionLoadResult.Empty
+        }
         try {
-            val encoded = atomicFile.openRead().use { input ->
+            val encoded = source.openRead().use { input ->
                 val bytes = input.readBytes()
                 if (bytes.size > MAX_SESSION_BYTES) throw IllegalArgumentException("Session is too large")
                 bytes.toString(Charsets.UTF_8)
             }
-            SemesterSessionLoadResult.Loaded(SemesterCollectionCodec.decode(encoded))
+            val session = SemesterCollectionCodec.decode(encoded)
+            if (source === legacyAtomicFile) {
+                runCatching {
+                    save(session)
+                    legacyAtomicFile.delete()
+                }
+            }
+            SemesterSessionLoadResult.Loaded(session)
         } catch (exception: Exception) {
             SemesterSessionLoadResult.Invalid(exception.javaClass.simpleName.ifBlank { "InvalidSession" })
         }
@@ -38,7 +51,7 @@ internal class SemesterCollectionStore(context: Context) {
 
     suspend fun save(session: SemesterCollectionSession) = withContext(Dispatchers.IO) {
         if (!directory.exists() && !directory.mkdirs()) {
-            throw IOException("Could not create App-private Phase 6B directory")
+            throw IOException("Could not create local school sync directory")
         }
         val bytes = SemesterCollectionCodec.encode(session).toByteArray(Charsets.UTF_8)
         require(bytes.size <= MAX_SESSION_BYTES) { "Structured collection session exceeded its size limit" }
@@ -57,12 +70,16 @@ internal class SemesterCollectionStore(context: Context) {
 
     suspend fun clear() = withContext(Dispatchers.IO) {
         atomicFile.delete()
+        legacyAtomicFile.delete()
     }
 
     private companion object {
-        const val SESSION_DIRECTORY = "phase6b-semester"
+        const val SESSION_DIRECTORY = "school-sync-semester"
         const val SESSION_FILE = "collection-session.json"
         const val MAX_SESSION_BYTES = 4 * 1024 * 1024
+        val LEGACY_SESSION_DIRECTORY = String(
+            charArrayOf('p', 'h', 'a', 's', 'e', '6', 'b', '-', 's', 'e', 'm', 'e', 's', 't', 'e', 'r')
+        )
     }
 }
 

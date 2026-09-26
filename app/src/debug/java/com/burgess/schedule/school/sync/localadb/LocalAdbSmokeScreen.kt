@@ -144,7 +144,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
     var mapsScanResult by remember { mutableStateOf<ProcMapsScanResult?>(null) }
     var mapsScanMessage by remember { mutableStateOf<String?>(null) }
     var commandProbe by remember { mutableStateOf(CommandExecutorProbeResult()) }
-    var commandProbeResults by remember { mutableStateOf<Map<LocalAdbCommandKind, CommandExecutorProbeResult>>(emptyMap()) }
+    var commandProbeResults by remember { mutableStateOf<Map<LocalAdbCommandDescriptor, CommandExecutorProbeResult>>(emptyMap()) }
     var devToolsStateHistory by remember { mutableStateOf<List<DevToolsDiscoveryState>>(emptyList()) }
     var devToolsResult by remember { mutableStateOf<DevToolsTargetDiscoveryResult?>(null) }
     var devToolsMessage by remember { mutableStateOf<String?>(null) }
@@ -255,7 +255,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
         }
     }
 
-    fun recordCommandProbe(kind: LocalAdbCommandKind, result: CommandExecutorProbeResult) {
+    fun recordCommandProbe(kind: LocalAdbCommandDescriptor, result: CommandExecutorProbeResult) {
         commandProbe = result
         commandProbeResults = commandProbeResults + (kind to result)
     }
@@ -1129,7 +1129,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
             try {
                 if (!client.connect(port)) throw IOException("TLS connection was not established")
                 val result = client.executeReadOnly(command)
-                val printfAnalysis = if (command.kind == LocalAdbCommandKind.PRINTF_TEST) {
+                val printfAnalysis = if (command.kind == DebugLocalAdbCommandKind.PRINTF_TEST) {
                     analyzePrintfTestOutput(result.output, result.exitCode)
                 } else {
                     null
@@ -1942,7 +1942,7 @@ internal fun LocalAdbSmokeScreen(onBack: () -> Unit) {
                 }
                 listOf(
                     LocalAdbCommandKind.ID,
-                    LocalAdbCommandKind.PRINTF_TEST,
+                    DebugLocalAdbCommandKind.PRINTF_TEST,
                     LocalAdbCommandKind.PROC_UNIX_READ,
                     LocalAdbCommandKind.MISSING_PROCESS_QUERY
                 ).forEach { kind ->

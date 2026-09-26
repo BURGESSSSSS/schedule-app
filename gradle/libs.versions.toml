@@ -11,7 +11,6 @@ composeBom = "2026.02.01"
 ksp = "2.2.10-2.0.2"
 room = "2.8.4"
 mlkitTextRecognition = "16.0.1"
-shizuku = "13.1.5"
 libadb = "3.1.1"
 sunSecurityAndroid = "1.1"
 conscryptAndroid = "2.5.3"
@@ -36,8 +35,6 @@ androidx-room-runtime = { group = "androidx.room", name = "room-runtime", versio
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 google-mlkit-text-recognition-chinese = { group = "com.google.mlkit", name = "text-recognition-chinese", version.ref = "mlkitTextRecognition" }
-shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
-shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 libadb-android = { group = "com.github.MuntashirAkon", name = "libadb-android", version.ref = "libadb" }
 org-json = { group = "org.json", name = "json", version.ref = "json" }
 sun-security-android = { group = "com.github.MuntashirAkon", name = "sun-security-android", version.ref = "sunSecurityAndroid" }

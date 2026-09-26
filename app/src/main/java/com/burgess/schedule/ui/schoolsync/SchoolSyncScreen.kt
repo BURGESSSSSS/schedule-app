@@ -59,7 +59,6 @@ import com.burgess.schedule.school.sync.localadb.DevToolsCdpClient
 import com.burgess.schedule.school.sync.localadb.DevToolsCdpConnectResult
 import com.burgess.schedule.school.sync.localadb.DevToolsDiscoveryState
 import com.burgess.schedule.school.sync.localadb.DevToolsTargetDiscoveryResult
-import com.burgess.schedule.school.sync.localadb.LocalAdbCheckState
 import com.burgess.schedule.school.sync.localadb.LocalAdbClient
 import com.burgess.schedule.school.sync.localadb.LocalAdbReadIssue
 import com.burgess.schedule.school.sync.localadb.LocalAdbReadOnlyCommand
@@ -118,7 +117,6 @@ internal fun SchoolSyncScreen(
     var busy by remember { mutableStateOf(false) }
     var operation by remember { mutableStateOf("") }
     var pairingComplete by remember { mutableStateOf(false) }
-    var connectionState by remember { mutableStateOf(LocalAdbCheckState.NOT_RUN) }
     var uidVerified by remember { mutableStateOf(false) }
     var productError by remember { mutableStateOf<String?>(null) }
     var discovery by remember { mutableStateOf<DevToolsTargetDiscoveryResult?>(null) }
@@ -137,7 +135,6 @@ internal fun SchoolSyncScreen(
     var confirmImport by remember { mutableStateOf(false) }
     var importResult by remember { mutableStateOf<SchoolImportExecutionResult?>(null) }
     var capturedRequestCount by remember { mutableStateOf(0) }
-    var capturedRequests by remember { mutableStateOf(0) }
 
     DisposableEffect(adb) {
         onDispose { adb.close() }
@@ -221,12 +218,10 @@ internal fun SchoolSyncScreen(
         productError = null
         busy = true
         operation = "connect"
-        connectionState = LocalAdbCheckState.ADB_CONNECTING
         uidVerified = false
         scope.launch {
             try {
                 if (!adb.connect(port!!)) throw IOException("Wireless debugging connection failed")
-                connectionState = LocalAdbCheckState.ADB_CONNECTED
                 val id = adb.executeReadOnly(LocalAdbReadOnlyCommand.ID)
                 val checked = evaluateLocalAdbUidCheck(
                     id.output.takeIf { id.commandCompleted && id.issue == LocalAdbReadIssue.NONE }.orEmpty(),
@@ -234,11 +229,9 @@ internal fun SchoolSyncScreen(
                     id.failureSummary
                 )
                 if (!checked.uidVerified) {
-                    connectionState = LocalAdbCheckState.SHELL_FAILED
                     connectedPort = null
                     productError = "无线调试连接异常，请确认连接端口正确后重新连接。"
                 } else {
-                    connectionState = LocalAdbCheckState.ID_EXECUTED
                     connectedPort = port
                     uidVerified = true
                     productError = null
@@ -246,7 +239,6 @@ internal fun SchoolSyncScreen(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                connectionState = LocalAdbCheckState.ADB_CONNECTION_FAILED
                 connectedPort = null
                 uidVerified = false
                 productError = "无线调试连接失败，请重新检查系统无线调试端口。"
@@ -406,7 +398,6 @@ internal fun SchoolSyncScreen(
                         val confirmed = snapshot.recentRequests.filter {
                             it.bodyState == CourseBodyState.COURSE_JSON_CONFIRMED && it.scheduleSnapshot != null
                         }
-                        capturedRequests = confirmed.size
                         confirmed.forEach { request ->
                             if (!handledIds.add(request.requestId)) return@forEach
                             val payload = request.scheduleSnapshot ?: return@forEach
@@ -654,8 +645,13 @@ internal fun SchoolSyncScreen(
                         }
                         if (importPreparing) Text("正在检查本地课程…", style = AppType.caption, color = colors.mut)
                         if (importWriting) Text("正在导入…", style = AppType.caption, color = colors.mut)
-                        if (plan.canConfirm && importResult !is SchoolImportExecutionResult.Success) {
+                        if (plan.canConfirm && importResult !is SchoolImportExecutionResult.Success &&
+                            importResult !is SchoolImportExecutionResult.StalePlan
+                        ) {
                             PillButton("导入课表", { confirmImport = true })
+                        }
+                        if (importResult is SchoolImportExecutionResult.StalePlan) {
+                            PillButton("重新检查导入计划", { mergedSchedule?.let(::prepareImport) }, PillStyle.Secondary)
                         }
                     }
                 }
