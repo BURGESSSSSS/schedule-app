@@ -262,7 +262,8 @@ internal fun MoreScreen(
     onDevLogClick: () -> Unit,
     onDeveloperClick: () -> Unit,
     onSchoolSyncClick: () -> Unit = {},
-    onSchoolSyncDiagnosticsClick: () -> Unit = {}
+    onSchoolSyncDiagnosticsClick: () -> Unit = {},
+    onBackupClick: () -> Unit = {}
 ) {
     Column(
         Modifier.fillMaxSize().padding(AppSpace.page),
@@ -272,6 +273,8 @@ internal fun MoreScreen(
         SectionLabel("课程")
         ListGroup {
             ListRow("课程提醒", "通知权限和测试通知", onReminderClick, icon = R.drawable.symbol_notifications)
+            HorizontalDivider(color = Hairline)
+            ListRow("备份与恢复", "导出或恢复本地课程表", onBackupClick, icon = R.drawable.symbol_content_copy)
             HorizontalDivider(color = Hairline)
             ListRow("学校课表同步", "从企业微信教务系统导入课程", onSchoolSyncClick, icon = R.drawable.symbol_history)
         }

@@ -29,6 +29,9 @@ interface CourseDao {
     @Query("SELECT MAX(id) FROM courses")
     suspend fun maxId(): Long?
 
+    @Query("DELETE FROM courses")
+    suspend fun clearAllCourses()
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(course: CourseEntity)
 
@@ -37,6 +40,9 @@ interface CourseDao {
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertImportedCourse(course: CourseEntity)
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertBackupCourses(courses: List<CourseEntity>)
 
     @Update
     suspend fun updateImportedCourse(course: CourseEntity): Int
