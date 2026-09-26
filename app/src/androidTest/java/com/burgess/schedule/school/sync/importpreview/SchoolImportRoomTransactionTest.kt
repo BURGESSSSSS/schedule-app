@@ -65,7 +65,7 @@ class SchoolImportRoomTransactionTest {
     }
 
     @Test
-    fun contentAndWeekSetChangeUpdateExistingRowsWithoutDuplicatingThem() = runBlocking {
+    fun contentChangesUpdateMatchesWhileAddedAndRemovedWeeksRemainOccurrenceScoped() = runBlocking {
         val original = listOf(
             schoolCourse("node", week = 1, teacher = "Teacher A", room = "E209"),
             schoolCourse("node", week = 3, teacher = "Teacher A", room = "E209"),
@@ -79,15 +79,20 @@ class SchoolImportRoomTransactionTest {
             schoolCourse("node", week = 7, teacher = "Teacher B", room = "E303")
         )
         val plan = repository.prepare(input(changed))
-        assertEquals(0, plan.toInsert.size)
-        assertEquals(3, plan.toUpdate.size)
+        assertEquals(1, plan.toInsert.size)
+        assertEquals(2, plan.toUpdate.size)
+        assertEquals(1, plan.missingFromSchool.size)
         val result = repository.import(plan) as SchoolImportExecutionResult.Success
 
-        assertEquals(3, result.updated)
+        assertEquals(1, result.inserted)
+        assertEquals(2, result.updated)
+        assertEquals(1, result.missingFromSchool)
         val stored = database.courseDao().getBySourceSemester(CourseSourceType.SDBI, SEMESTER_KEY)
-        assertEquals(3, stored.size)
-        assertEquals(setOf(1, 3, 7), stored.map { it.weekNumber }.toSet())
-        assertTrue(stored.all { it.teacher == "Teacher B" && it.room == "E303" })
+        assertEquals(4, stored.size)
+        assertEquals(setOf(1, 3, 5, 7), stored.map { it.weekNumber }.toSet())
+        assertTrue(stored.filter { it.weekNumber in setOf(1, 3, 7) }
+            .all { it.teacher == "Teacher B" && it.room == "E303" })
+        assertTrue(stored.single { it.weekNumber == 5 }.teacher == "Teacher A")
     }
 
     @Test
@@ -101,8 +106,8 @@ class SchoolImportRoomTransactionTest {
         assertEquals(1, result.missingFromSchool)
         val stored = database.courseDao().getBySourceSemester(CourseSourceType.SDBI, SEMESTER_KEY)
         assertEquals(2, stored.size)
-        assertTrue(stored.any { it.externalKey == "old" && it.weekNumber == 2 })
-        assertTrue(stored.any { it.externalKey == "new" && it.weekNumber == 4 })
+        assertTrue(stored.any { it.name == "Course old" && it.weekNumber == 2 })
+        assertTrue(stored.any { it.name == "Course new" && it.weekNumber == 4 })
     }
 
     @Test
@@ -194,20 +199,38 @@ class SchoolImportRoomTransactionTest {
         room: String = "E209",
         day: Int = 0,
         period: Int = 0
-    ) = CourseEntity(
-        id = 0L,
-        name = name,
-        teacher = teacher,
-        room = room,
-        dayIndex = day,
-        period = period,
-        endPeriod = period + 1,
-        weekNumber = week,
-        colorValue = 0xff123456.toInt(),
-        sourceType = CourseSourceType.SDBI,
-        sourceSemesterKey = SEMESTER_KEY,
-        externalKey = identity
-    )
+    ): CourseEntity {
+        val occurrence = SchoolCourseOccurrence(
+            academicYear = "2026-2027",
+            semesterFlag = "1",
+            week = week,
+            courseName = name,
+            courseCode = identity,
+            teachingClassCode = identity,
+            teachingClassName = null,
+            teacher = teacher,
+            dayOfWeek = day + 1,
+            startSection = period + 1,
+            endSection = period + 2,
+            location = room,
+            campus = "本校区",
+            sourceRuleKey = identity
+        )
+        return CourseEntity(
+            id = 0L,
+            name = name,
+            teacher = teacher,
+            room = room,
+            dayIndex = day,
+            period = period,
+            endPeriod = period + 1,
+            weekNumber = week,
+            colorValue = 0xff123456.toInt(),
+            sourceType = CourseSourceType.SDBI,
+            sourceSemesterKey = SEMESTER_KEY,
+            externalKey = requireNotNull(SchoolOccurrenceIdentity.externalKey(occurrence))
+        )
+    }
 
     private fun localCourse(name: String, room: String = "E209") = CourseEntity(
         id = System.nanoTime(),

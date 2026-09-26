@@ -310,7 +310,6 @@ internal fun SchoolScheduleSnapshot.withoutNonPreviewFields(): SchoolScheduleSna
         rule.copy(
             rawLocation = rule.displayLocation,
             studentCount = null,
-            teachingClassName = null,
             courseOfferingCode = null,
             dateText = null,
             beginTimeText = null,

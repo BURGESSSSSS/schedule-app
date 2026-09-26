@@ -7,7 +7,7 @@ internal enum class SchoolImportConflictCode {
     MISSING_STABLE_IDENTITY,
     INVALID_COURSE_RULE,
     SEMESTER_RULE_COVERAGE_WARNING,
-    DUPLICATE_SCHOOL_IDENTITY,
+    DUPLICATE_SCHOOL_OCCURRENCE_IDENTITY,
     DUPLICATE_STORED_IDENTITY,
     MISSING_STORED_IDENTITY,
     EMPTY_SCHOOL_SEMESTER
@@ -27,7 +27,9 @@ internal data class SchoolImportInput(
     val coverageComplete: Boolean,
     val sourceSemesterKey: String?,
     val courses: List<CourseEntity>,
-    val conflicts: List<SchoolImportConflict> = emptyList()
+    val conflicts: List<SchoolImportConflict> = emptyList(),
+    val mappedOccurrenceCount: Int = courses.size,
+    val occurrenceIdentityCollisions: List<SchoolOccurrenceIdentityCollision> = emptyList()
 )
 
 internal data class SchoolCourseUpdate(

@@ -266,6 +266,7 @@ internal object SemesterCollectionCodec {
         .putNullable("credits", rule.credits)
         .putNullable("teacher", rule.teacher)
         .putNullable("teachingClassCode", rule.teachingClassCode)
+        .putNullable("teachingClassName", rule.teachingClassName)
         .putNullable("sectionText", rule.sectionText)
         .putNullable("sectionCodeText", rule.sectionCodeText)
         .putNullable("startSection", rule.startSection)
@@ -309,7 +310,7 @@ internal object SemesterCollectionCodec {
             weekParseStatus = status,
             oddEvenText = json.optNullableString("oddEvenText"),
             teacherCode = null,
-            teachingClassName = null,
+            teachingClassName = json.optNullableString("teachingClassName"),
             courseOfferingCode = null,
             dateText = null,
             beginTimeText = null,

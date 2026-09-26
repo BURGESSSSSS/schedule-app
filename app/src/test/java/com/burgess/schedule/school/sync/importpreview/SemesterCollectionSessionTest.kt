@@ -210,6 +210,7 @@ class SemesterCollectionSessionTest {
     @Test
     fun sessionCodecRestoresCoverageAndDoesNotPersistRawResponseOrOptionalSensitiveFields() {
         val sensitiveOptionalFields = rule("safe-rule").copy(
+            teachingClassName = "  Example   Teaching Class  ",
             liveUrl = "https://example.invalid/?token=private-token-value",
             note = "raw-body-private-marker",
             sourceFieldNames = setOf("authorization")
@@ -221,6 +222,7 @@ class SemesterCollectionSessionTest {
 
         assertEquals(setOf(1), restored.capturedWeeks)
         assertEquals(setOf(1), restored.sourceWeeksByRuleKey.getValue("safe-rule"))
+        assertEquals("  Example   Teaching Class  ", restored.rulesByKey.getValue("safe-rule").teachingClassName)
         assertNull(restored.rulesByKey.getValue("safe-rule").liveUrl)
         assertNull(restored.rulesByKey.getValue("safe-rule").note)
         assertFalse(encoded.contains("private-token-value"))

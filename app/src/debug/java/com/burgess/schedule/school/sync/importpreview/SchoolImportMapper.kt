@@ -71,8 +71,12 @@ internal object SchoolImportMapper {
         val maxWeek = snapshot.maxWeek
         val semesterKey = SchoolImportIdentity.semesterKey(academicYear, semesterFlag)
         val conflicts = mutableListOf<SchoolImportConflict>()
-        data class MappedCourse(val identity: String, val ruleKey: String, val course: CourseEntity)
-        val mapped = mutableListOf<MappedCourse>()
+        data class MappedOccurrence(
+            val identity: String,
+            val occurrence: SchoolCourseOccurrence,
+            val course: CourseEntity
+        )
+        val mapped = mutableListOf<MappedOccurrence>()
         val candidatesByRule = semester.candidates.groupBy(SchoolImportCandidate::sourceRuleKey)
         val knownRuleKeys = semester.snapshot.courseRules.mapTo(mutableSetOf(), SchoolCourseRule::ruleKey)
         val hasMetadata = academicYear != null && semesterFlag != null && semesterKey != null
@@ -86,12 +90,6 @@ internal object SchoolImportMapper {
             conflicts += SchoolImportConflict(SchoolImportConflictCode.MISSING_SEMESTER_METADATA)
         } else {
             semester.snapshot.courseRules.forEach { rule ->
-                val externalKey = SchoolImportIdentity.externalKey(academicYear, semesterFlag, rule)
-                if (externalKey == null) {
-                    conflicts += SchoolImportConflict(SchoolImportConflictCode.MISSING_STABLE_IDENTITY)
-                    return@forEach
-                }
-
                 val coverageWarnings = semester.ruleWarningsByKey[rule.ruleKey].orEmpty()
                 if (coverageWarnings.isNotEmpty()) {
                     conflicts += SchoolImportConflict(
@@ -111,18 +109,49 @@ internal object SchoolImportMapper {
                     return@forEach
                 }
 
+                val occurrences = ruleCandidates.mapNotNull { candidate ->
+                    val week = candidate.weekNumber ?: return@mapNotNull null
+                    SchoolCourseOccurrence(
+                        academicYear = academicYear,
+                        semesterFlag = semesterFlag,
+                        week = week,
+                        courseName = rule.courseName.orEmpty(),
+                        courseCode = rule.courseCode,
+                        teachingClassCode = rule.teachingClassCode,
+                        teachingClassName = rule.teachingClassName,
+                        teacher = rule.teacher,
+                        dayOfWeek = rule.dayOfWeek,
+                        startSection = requireNotNull(rule.startSection),
+                        endSection = requireNotNull(rule.endSection),
+                        location = rule.displayLocation,
+                        campus = rule.campus,
+                        sourceRuleKey = rule.ruleKey
+                    )
+                }
+                if (occurrences.size != ruleCandidates.size) {
+                    conflicts += SchoolImportConflict(SchoolImportConflictCode.INVALID_COURSE_RULE)
+                    return@forEach
+                }
+                val occurrenceKeys = occurrences.map { occurrence ->
+                    SchoolOccurrenceIdentity.externalKey(occurrence)
+                }
+                if (occurrenceKeys.any { it == null }) {
+                    conflicts += SchoolImportConflict(SchoolImportConflictCode.MISSING_STABLE_IDENTITY)
+                    return@forEach
+                }
+
                 val colorArgb = courseAccentFor(SchoolImportIdentity.colorSeed(rule)).toArgb()
-                ruleCandidates.forEach candidateLoop@{ candidate ->
-                    val week = candidate.weekNumber ?: return@candidateLoop
-                    mapped += MappedCourse(externalKey, rule.ruleKey, CourseEntity(
+                occurrences.zip(occurrenceKeys).forEach { (occurrence, key) ->
+                    val externalKey = requireNotNull(key)
+                    mapped += MappedOccurrence(externalKey, occurrence, CourseEntity(
                         id = 0L,
-                        name = candidate.name,
-                        teacher = candidate.teacher,
-                        room = candidate.room,
-                        dayIndex = candidate.dayIndex,
-                        period = requireNotNull(candidate.period),
-                        endPeriod = requireNotNull(candidate.endPeriod),
-                        weekNumber = week,
+                        name = occurrence.courseName,
+                        teacher = occurrence.teacher.orEmpty(),
+                        room = occurrence.databaseRoomContent(),
+                        dayIndex = occurrence.dayOfWeek - 1,
+                        period = occurrence.startSection - 1,
+                        endPeriod = occurrence.endSection - 1,
+                        weekNumber = occurrence.week,
                         colorValue = colorArgb,
                         shortName = null,
                         sourceType = CourseSourceType.SDBI,
@@ -133,21 +162,21 @@ internal object SchoolImportMapper {
             }
         }
 
-        val duplicateRuleIdentities = mapped.groupBy(MappedCourse::identity)
-            .filterValues { rows -> rows.map(MappedCourse::ruleKey).distinct().size > 1 }
-            .keys
-        val duplicateOccurrences = mapped.groupBy { it.identity to it.course.weekNumber }
-            .filterValues { it.size > 1 }.keys.mapTo(mutableSetOf()) { it.first }
-        val duplicateKeys = duplicateRuleIdentities + duplicateOccurrences
+        val collisionGroups = mapped.groupBy(MappedOccurrence::identity)
+            .filterValues { occurrences -> occurrences.size > 1 }
+        val duplicateKeys = collisionGroups.keys
+        val collisionDetails = collisionGroups.map { (identity, rows) ->
+            SchoolOccurrenceIdentityCollision(identity, rows.map(MappedOccurrence::occurrence))
+        }
         if (duplicateKeys.isNotEmpty()) {
             conflicts += SchoolImportConflict(
-                SchoolImportConflictCode.DUPLICATE_SCHOOL_IDENTITY,
+                SchoolImportConflictCode.DUPLICATE_SCHOOL_OCCURRENCE_IDENTITY,
                 duplicateKeys.size
             )
         }
 
-        // Do not emit partially mapped rows for an identity that was duplicated by separate rules.
-        val validCourses = mapped.filterNot { it.identity in duplicateKeys }.map(MappedCourse::course)
+        // Do not emit any rows for a duplicated occurrence identity.
+        val validCourses = mapped.filterNot { it.identity in duplicateKeys }.map(MappedOccurrence::course)
         val exactCoverage = maxWeek?.takeIf { it > 0 }?.let { semester.capturedWeeks == (1..it).toSet() } == true
         val coverageComplete = semester.coverageComplete && exactCoverage && semester.missingWeeks.isEmpty() &&
             semester.collectionWarnings.none {
@@ -165,7 +194,9 @@ internal object SchoolImportMapper {
             coverageComplete = coverageComplete,
             sourceSemesterKey = semesterKey,
             courses = validCourses,
-            conflicts = conflicts
+            conflicts = conflicts,
+            mappedOccurrenceCount = mapped.size,
+            occurrenceIdentityCollisions = collisionDetails
         )
     }
 }

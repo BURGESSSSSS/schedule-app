@@ -41,25 +41,59 @@ class SchoolImportPlannerTest {
     }
 
     @Test
-    fun teacherRoomAndChangedWeekSetUpdateTheExistingRuleRows() {
-        val oldRows = listOf(
-            schoolCourse("node", 1, teacher = "Teacher A", room = "E209"),
-            schoolCourse("node", 3, teacher = "Teacher A", room = "E209"),
-            schoolCourse("node", 5, teacher = "Teacher A", room = "E209")
-        ).mapIndexed { index, course -> course.copy(id = index + 1L) }
-        val changedRows = listOf(
-            schoolCourse("node", 1, teacher = "Teacher B", room = "E303"),
-            schoolCourse("node", 3, teacher = "Teacher B", room = "E303"),
-            schoolCourse("node", 7, teacher = "Teacher B", room = "E303")
-        )
+    fun locationChangeUpdatesTheSameWeeklyOccurrence() {
+        val old = schoolCourse("node", 13, room = "E209").copy(id = 1L)
+        val updated = schoolCourse("node", 13, room = "E303")
 
-        val plan = SchoolImportPlanner.create(input(changedRows), oldRows)
+        val plan = SchoolImportPlanner.create(input(listOf(updated)), listOf(old))
 
         assertTrue(plan.canConfirm)
         assertEquals(0, plan.toInsert.size)
-        assertEquals(3, plan.toUpdate.size)
-        assertEquals(setOf(1, 3, 7), plan.toUpdate.map { it.replacement.weekNumber }.toSet())
-        assertTrue(plan.toUpdate.all { it.replacement.teacher == "Teacher B" && it.replacement.room == "E303" })
+        assertEquals(1, plan.toUpdate.size)
+        assertEquals(0, plan.unchanged.size)
+        assertEquals(0, plan.missingFromSchool.size)
+        assertEquals("E303", plan.toUpdate.single().replacement.room)
+    }
+
+    @Test
+    fun teacherChangeUpdatesTheSameWeeklyOccurrence() {
+        val old = schoolCourse("node", 13, teacher = "Teacher A").copy(id = 1L)
+        val updated = schoolCourse("node", 13, teacher = "Teacher B")
+
+        val plan = SchoolImportPlanner.create(input(listOf(updated)), listOf(old))
+
+        assertEquals(0, plan.toInsert.size)
+        assertEquals(1, plan.toUpdate.size)
+        assertEquals("Teacher B", plan.toUpdate.single().replacement.teacher)
+    }
+
+    @Test
+    fun addingAWeekInsertsOnlyTheNewOccurrence() {
+        val oldRows = listOf(schoolCourse("node", 13), schoolCourse("node", 17))
+            .mapIndexed { index, course -> course.copy(id = index + 1L) }
+        val currentRows = listOf(schoolCourse("node", 13), schoolCourse("node", 17), schoolCourse("node", 18))
+
+        val plan = SchoolImportPlanner.create(input(currentRows), oldRows)
+
+        assertTrue(plan.canConfirm)
+        assertEquals(listOf(18), plan.toInsert.map { it.weekNumber })
+        assertEquals(setOf(13, 17), plan.unchanged.map { it.weekNumber }.toSet())
+        assertEquals(0, plan.toUpdate.size)
+        assertEquals(0, plan.missingFromSchool.size)
+    }
+
+    @Test
+    fun removingAWeekReportsOnlyThatOccurrenceAsMissing() {
+        val oldRows = listOf(schoolCourse("node", 13), schoolCourse("node", 17))
+            .mapIndexed { index, course -> course.copy(id = index + 1L) }
+
+        val plan = SchoolImportPlanner.create(input(listOf(schoolCourse("node", 13))), oldRows)
+
+        assertTrue(plan.canConfirm)
+        assertEquals(0, plan.toInsert.size)
+        assertEquals(listOf(13), plan.unchanged.map { it.weekNumber })
+        assertEquals(listOf(17), plan.missingFromSchool.map { it.weekNumber })
+        assertEquals(0, plan.toUpdate.size)
     }
 
     @Test
@@ -150,18 +184,33 @@ class SchoolImportPlannerTest {
     }
 
     @Test
-    fun sameSubjectOnDifferentDaysAndSameSlotAtDifferentPlacesStayDistinct() {
+    fun sameCourseOnDifferentDaysOrSectionsStaysDistinct() {
         val rows = listOf(
-            schoolCourse("mon", week = 1, day = 0, period = 0, room = "E209"),
-            schoolCourse("wed", week = 1, day = 2, period = 0, room = "E209"),
-            schoolCourse("room-a", week = 1, day = 4, period = 2, room = "E303"),
-            schoolCourse("room-b", week = 1, day = 4, period = 2, room = "E304")
+            schoolCourse("same-course", week = 1, day = 0, period = 0),
+            schoolCourse("same-course", week = 1, day = 2, period = 0),
+            schoolCourse("same-course", week = 1, day = 4, period = 2),
+            schoolCourse("same-course", week = 1, day = 4, period = 4)
         )
 
         val plan = SchoolImportPlanner.create(input(rows), emptyList())
 
+        assertTrue(plan.conflicts.isEmpty())
         assertEquals(4, plan.toInsert.size)
         assertEquals(4, plan.toInsert.map { it.externalKey }.toSet().size)
+    }
+
+    @Test
+    fun duplicateSameWeekDayAndSectionIsARealOccurrenceIdentityConflict() {
+        val first = schoolCourse("same-course", week = 9, room = "E209")
+        val second = schoolCourse("same-course", week = 9, room = "E303")
+
+        val plan = SchoolImportPlanner.create(input(listOf(first, second)), emptyList())
+
+        assertFalse(plan.canConfirm)
+        assertTrue(plan.toInsert.isEmpty())
+        assertEquals(1, plan.conflicts.single {
+            it.code == SchoolImportConflictCode.DUPLICATE_SCHOOL_OCCURRENCE_IDENTITY
+        }.count)
     }
 
     private fun input(
@@ -187,18 +236,36 @@ class SchoolImportPlannerTest {
         room: String = "E209",
         day: Int = 0,
         period: Int = 0
-    ) = CourseEntity(
-        id = 0L,
-        name = name,
-        teacher = teacher,
-        room = room,
-        dayIndex = day,
-        period = period,
-        endPeriod = period + 1,
-        weekNumber = week,
-        colorValue = 0xff123456.toInt(),
-        sourceType = CourseSourceType.SDBI,
-        sourceSemesterKey = "semester-hash",
-        externalKey = identity
-    )
+    ): CourseEntity {
+        val occurrence = SchoolCourseOccurrence(
+            academicYear = "2026-2027",
+            semesterFlag = "1",
+            week = week,
+            courseName = name,
+            courseCode = identity,
+            teachingClassCode = identity,
+            teachingClassName = null,
+            teacher = teacher,
+            dayOfWeek = day + 1,
+            startSection = period + 1,
+            endSection = period + 2,
+            location = room,
+            campus = "本校区",
+            sourceRuleKey = identity
+        )
+        return CourseEntity(
+            id = 0L,
+            name = name,
+            teacher = teacher,
+            room = room,
+            dayIndex = day,
+            period = period,
+            endPeriod = period + 1,
+            weekNumber = week,
+            colorValue = 0xff123456.toInt(),
+            sourceType = CourseSourceType.SDBI,
+            sourceSemesterKey = "semester-hash",
+            externalKey = requireNotNull(SchoolOccurrenceIdentity.externalKey(occurrence))
+        )
+    }
 }

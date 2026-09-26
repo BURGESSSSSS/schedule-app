@@ -56,7 +56,7 @@ internal object SchoolImportPlanner {
         val conflictingKeys = candidateDuplicates.keys.mapTo(mutableSetOf()) { requireNotNull(it.first) }
         if (candidateDuplicates.isNotEmpty()) {
             conflicts += SchoolImportConflict(
-                SchoolImportConflictCode.DUPLICATE_SCHOOL_IDENTITY,
+                SchoolImportConflictCode.DUPLICATE_SCHOOL_OCCURRENCE_IDENTITY,
                 candidateDuplicates.size
             )
         }
@@ -215,7 +215,7 @@ internal object SchoolImportPlanner {
         SchoolImportConflictCode.MISSING_STABLE_IDENTITY,
         SchoolImportConflictCode.INVALID_COURSE_RULE,
         SchoolImportConflictCode.SEMESTER_RULE_COVERAGE_WARNING,
-        SchoolImportConflictCode.DUPLICATE_SCHOOL_IDENTITY,
+        SchoolImportConflictCode.DUPLICATE_SCHOOL_OCCURRENCE_IDENTITY,
         SchoolImportConflictCode.DUPLICATE_STORED_IDENTITY,
         SchoolImportConflictCode.MISSING_STORED_IDENTITY,
         SchoolImportConflictCode.EMPTY_SCHOOL_SEMESTER
