@@ -58,8 +58,8 @@ android {
         applicationId = "com.burgess.schedule"
         minSdk = 24
         targetSdk = 37
-        versionCode = 11
-        versionName = "1.3.2"
+        versionCode = 15
+        versionName = "1.3.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
