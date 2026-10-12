@@ -38,21 +38,21 @@ class WelcomeTutorialFlowTest {
 
     @Test
     fun welcomeRemainsUntilDismissedAndDoesNotReturnAfterRestart() {
-        compose.onNodeWithText("欢迎使用课程表").assertIsDisplayed()
+        compose.onNodeWithText("欢迎使用").assertIsDisplayed()
         capture("welcome")
         scenario!!.recreate()
-        compose.onNodeWithText("欢迎使用课程表").assertIsDisplayed()
+        compose.onNodeWithText("欢迎使用").assertIsDisplayed()
         compose.onNodeWithText(DEVELOPER_EMAIL).assertIsDisplayed().performClick()
         compose.onNodeWithText("邮箱已复制").assertIsDisplayed()
         assertFalse(preferences.getBoolean("welcome_seen", false))
         compose.onNodeWithText("先逛一逛").assertIsDisplayed().performClick()
-        compose.onNodeWithText("欢迎使用课程表").assertDoesNotExist()
+        compose.onNodeWithText("欢迎使用").assertDoesNotExist()
         assertTrue(preferences.getBoolean("welcome_seen", false))
         scenario!!.recreate()
-        compose.onNodeWithText("欢迎使用课程表").assertDoesNotExist()
+        compose.onNodeWithText("欢迎使用").assertDoesNotExist()
         scenario!!.close()
         scenario = ActivityScenario.launch(MainActivity::class.java)
-        compose.onNodeWithText("欢迎使用课程表").assertDoesNotExist()
+        compose.onNodeWithText("欢迎使用").assertDoesNotExist()
         compose.onNodeWithText("更多").performClick()
         compose.onNodeWithText("课表导入教程").performScrollTo().performClick()
         compose.onNodeWithText("01 · 开启无线调试").performScrollTo().assertIsDisplayed()
@@ -70,12 +70,10 @@ class WelcomeTutorialFlowTest {
     }
 
     @Test
-    fun welcomeDirectImportShortcutAndBackKeepTutorialAvailableInMore() {
-        compose.onNodeWithText("直接导入").assertIsDisplayed().performClick()
-        compose.onNodeWithText("无线调试：未连接").assertIsDisplayed()
-        InstrumentationRegistry.getInstrumentation().runOnMainSync {
-            scenario!!.onActivity { it.onBackPressedDispatcher.onBackPressed() }
-        }
+    fun welcomeSkipKeepsTutorialAvailableInMore() {
+        compose.onNodeWithText("直接导入").assertDoesNotExist()
+        compose.onNodeWithText("先逛一逛").assertIsDisplayed().performClick()
+        compose.onNodeWithText("更多").performClick()
         compose.onNodeWithText("课表导入教程").performScrollTo().assertIsDisplayed()
         capture("more")
         compose.onNodeWithText("课表导入教程").performClick()

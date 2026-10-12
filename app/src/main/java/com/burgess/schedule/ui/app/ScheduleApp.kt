@@ -597,11 +597,6 @@ internal fun ScheduleApp(
                 selectedPage = 2
                 importTutorialVisible = true
             },
-            onStartImport = {
-                dismissWelcome()
-                selectedPage = 2
-                schoolSyncVisible = true
-            },
             onCopyEmail = {
                 (context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager)
                     ?.setPrimaryClip(ClipData.newPlainText("开发者邮箱", DEVELOPER_EMAIL))
