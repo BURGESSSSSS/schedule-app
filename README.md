@@ -2,6 +2,10 @@
 
 一个使用 Kotlin 和 Jetpack Compose 开发的 Android 课程表 App。
 
+## 下载与安装
+
+打开 [GitHub Releases](https://github.com/BURGESSSSSS/schedule-app/releases/latest)，在 Assets 中下载 `.apk` 文件，然后在 Android 手机上打开安装。`Source code` 是源码压缩包，不是安装包。
+
 ## 功能
 
 - 今日课程、进行中的课程和下一节课
@@ -53,6 +57,7 @@
 - [开发日志](docs/DEVLOG.md)
 - [设计改版进度](docs/REDESIGN_PROGRESS.md)
 - [第三方资源与许可](app/src/main/assets/licenses/SOURCES.md)
+- [上传源码与发布 APK 的步骤](docs/GITHUB_PUBLISHING.md)
 
 文档保留了不同阶段的记录，当前功能和构建版本请以代码为准。所有界面改动遵循 `DESIGN_BRIEF.md`。
 
