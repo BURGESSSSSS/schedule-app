@@ -353,7 +353,7 @@ internal fun MoreScreen(
             HorizontalDivider(color = Hairline)
             ListRow("学校课表同步", "从企业微信教务系统导入课程", onSchoolSyncClick, icon = R.drawable.symbol_history)
             HorizontalDivider(color = Hairline)
-            ListRow("课表导入教程", "首次导入的操作步骤与常见问题", onImportTutorialClick, icon = R.drawable.symbol_history)
+            ListRow("课表导入教程", "首次导入的操作步骤与常见问题", onImportTutorialClick, icon = R.drawable.symbol_menu_book)
         }
         SectionLabel("关于")
         ListGroup {

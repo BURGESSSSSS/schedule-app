@@ -2,6 +2,8 @@ package com.burgess.schedule
 
 import android.Manifest
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -113,6 +115,8 @@ import com.burgess.schedule.ui.backup.ScheduleBackupScreen
 import com.burgess.schedule.school.sync.debug.SchoolSyncDiagnosticsScreen
 import com.burgess.schedule.ui.schoolsync.SchoolSyncScreen
 import com.burgess.schedule.ui.schoolsync.ImportTutorialScreen
+import com.burgess.schedule.ui.onboarding.WelcomeDialog
+import com.burgess.schedule.ui.onboarding.DEVELOPER_EMAIL
 import com.burgess.schedule.ui.model.*
 import com.burgess.schedule.ui.components.SectionLabel
 import androidx.compose.runtime.key
@@ -152,6 +156,12 @@ internal fun ScheduleApp(
 ) {
     val hostContext = LocalContext.current
     val context = hostContext.applicationContext
+    val onboardingPreferences = remember(context) {
+        context.getSharedPreferences("onboarding", Context.MODE_PRIVATE)
+    }
+    var welcomeVisible by remember {
+        mutableStateOf(!onboardingPreferences.getBoolean("welcome_seen", false))
+    }
     val courseDao = remember {
         CourseDatabase.getInstance(context).courseDao()
     }
@@ -207,7 +217,7 @@ internal fun ScheduleApp(
     // Only visible course pages need a minute ticker; overlays and background stop it.
     val scheduleVisible = selectedPage in 0..1 && expandedCourse == null &&
         !editorVisible && !ocrVisible && !reminderVisible && !devLogVisible && !developerVisible &&
-            !schoolSyncVisible && !importTutorialVisible && !schoolSyncDiagnosticsVisible && !backupRestoreVisible && !importOptionsVisible
+            !schoolSyncVisible && !importTutorialVisible && !welcomeVisible && !schoolSyncDiagnosticsVisible && !backupRestoreVisible && !importOptionsVisible
     LaunchedEffect(scheduleVisible) {
         if (scheduleVisible) (hostContext as LifecycleOwner).lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
@@ -236,7 +246,13 @@ internal fun ScheduleApp(
         importOptionsVisible = true
     }
 
-    LaunchedEffect(sharedImageUri) {
+    fun dismissWelcome() {
+        onboardingPreferences.edit().putBoolean("welcome_seen", true).apply()
+        welcomeVisible = false
+    }
+
+    LaunchedEffect(sharedImageUri, welcomeVisible, importTutorialVisible, schoolSyncVisible) {
+        if (welcomeVisible || importTutorialVisible || schoolSyncVisible) return@LaunchedEffect
         sharedImageUri?.let { uri ->
             importWeekNumber = currentWeekNumber
             ocrUri = uri
@@ -571,6 +587,26 @@ internal fun ScheduleApp(
         }
     }
 
+    }
+
+    if (welcomeVisible) {
+        WelcomeDialog(
+            onDismiss = ::dismissWelcome,
+            onViewTutorial = {
+                dismissWelcome()
+                selectedPage = 2
+                importTutorialVisible = true
+            },
+            onStartImport = {
+                dismissWelcome()
+                selectedPage = 2
+                schoolSyncVisible = true
+            },
+            onCopyEmail = {
+                (context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager)
+                    ?.setPrimaryClip(ClipData.newPlainText("开发者邮箱", DEVELOPER_EMAIL))
+            }
+        )
     }
 
     if (importOptionsVisible) BottomSheetContainer({ importOptionsVisible = false }) {
