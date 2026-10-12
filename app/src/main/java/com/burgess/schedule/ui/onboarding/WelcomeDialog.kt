@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -76,19 +77,21 @@ internal fun WelcomeDialog(
                         Modifier.weight(1f, fill = false).verticalScroll(introductionScroll),
                         verticalArrangement = Arrangement.spacedBy(AppSpace.gap)
                     ) {
-                        Text("欢迎使用", style = AppType.sheetTitle, color = colors.ink)
+                        Text("欢迎使用", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, style = AppType.sheetTitle, color = colors.ink)
                         Text(
                             "本项目基于 Kotlin 原生 Android 技术架构开发，为山东商务职业学院学子深度定制。",
+                            modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                             style = AppType.body, color = colors.ink
                         )
                         Text(
                             "针对学校教务系统，打造了基于无线调试的课表导入功能，可从企业微信中的教务课表读取并导入整学期课程，减少手动录入的麻烦。",
+                            modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                             style = AppType.body, color = colors.mut
                         )
-                        Text("首次导入需要完成一些准备步骤，建议先阅读导入教程。", style = AppType.body, color = colors.mut)
+                        Text("首次导入需要完成一些准备步骤，建议先阅读导入教程。", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, style = AppType.body, color = colors.mut)
                     }
                     if (introductionScroll.maxValue > 0) {
-                        Text("上滑查看完整介绍", style = AppType.caption, color = colors.mut)
+                        Text("上滑查看完整介绍", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, style = AppType.caption, color = colors.mut)
                     }
                     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                         Box(
@@ -99,13 +102,14 @@ internal fun WelcomeDialog(
                                 .padding(horizontal = AppSpace.card),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("查看导入教程", style = AppType.caption, color = colors.onInk)
+                            Text("查看导入教程", textAlign = TextAlign.Center, style = AppType.caption, color = colors.onInk)
                         }
                         PillButton("先逛一逛", onDismiss, PillStyle.Ghost)
                     }
                     Column(Modifier.fillMaxWidth()) {
                         Text(
                             "使用过程中遇到问题，或有任何改进建议，欢迎通过邮箱联系开发者：",
+                            modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                             style = AppType.caption, color = colors.mut
                         )
                         Text(
@@ -113,10 +117,11 @@ internal fun WelcomeDialog(
                             modifier = Modifier.fillMaxWidth().heightIn(min = AppSpace.touch)
                                 .clickable(role = Role.Button) { onCopyEmail(); emailCopied = true }
                                 .padding(vertical = AppSpace.gap),
-                            style = AppType.caption, color = colors.mut
+                            textAlign = TextAlign.Center, style = AppType.caption, color = colors.mut
                         )
                         Text(
                             if (emailCopied) "邮箱已复制" else "点击邮箱即可复制",
+                            modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                             style = AppType.caption, color = colors.mut
                         )
                     }
