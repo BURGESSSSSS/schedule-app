@@ -24,3 +24,7 @@ hs_err_pid*
 
 *.log
 .kotlin/
+
+# Local device credentials and animation review recordings
+/.adb-user/
+/video_review/
