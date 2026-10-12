@@ -112,6 +112,7 @@ import com.burgess.schedule.ui.more.*
 import com.burgess.schedule.ui.backup.ScheduleBackupScreen
 import com.burgess.schedule.school.sync.debug.SchoolSyncDiagnosticsScreen
 import com.burgess.schedule.ui.schoolsync.SchoolSyncScreen
+import com.burgess.schedule.ui.schoolsync.ImportTutorialScreen
 import com.burgess.schedule.ui.model.*
 import com.burgess.schedule.ui.components.SectionLabel
 import androidx.compose.runtime.key
@@ -175,6 +176,7 @@ internal fun ScheduleApp(
     var devLogVisible by remember { mutableStateOf(false) }
     var developerVisible by remember { mutableStateOf(false) }
     var schoolSyncVisible by remember { mutableStateOf(false) }
+    var importTutorialVisible by remember { mutableStateOf(false) }
     var schoolSyncDiagnosticsVisible by remember { mutableStateOf(false) }
     var backupRestoreVisible by remember { mutableStateOf(false) }
     var importOptionsVisible by remember { mutableStateOf(false) }
@@ -205,7 +207,7 @@ internal fun ScheduleApp(
     // Only visible course pages need a minute ticker; overlays and background stop it.
     val scheduleVisible = selectedPage in 0..1 && expandedCourse == null &&
         !editorVisible && !ocrVisible && !reminderVisible && !devLogVisible && !developerVisible &&
-            !schoolSyncVisible && !schoolSyncDiagnosticsVisible && !backupRestoreVisible && !importOptionsVisible
+            !schoolSyncVisible && !importTutorialVisible && !schoolSyncDiagnosticsVisible && !backupRestoreVisible && !importOptionsVisible
     LaunchedEffect(scheduleVisible) {
         if (scheduleVisible) (hostContext as LifecycleOwner).lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
@@ -371,6 +373,7 @@ internal fun ScheduleApp(
                     devLogVisible = false
                     developerVisible = false
                     schoolSyncVisible = false
+                    importTutorialVisible = false
                     schoolSyncDiagnosticsVisible = false
                     backupRestoreVisible = false
                     reminderVisible = false
@@ -434,7 +437,8 @@ internal fun ScheduleApp(
                             onDeveloperClick = { developerVisible = true },
                             onSchoolSyncClick = { schoolSyncVisible = true },
                             onSchoolSyncDiagnosticsClick = { schoolSyncDiagnosticsVisible = true },
-                            onBackupClick = { backupRestoreVisible = true }
+                            onBackupClick = { backupRestoreVisible = true },
+                            onImportTutorialClick = { importTutorialVisible = true }
                         )
                     }
                 }
@@ -463,6 +467,22 @@ internal fun ScheduleApp(
                 )
             ) {
                 DeveloperScreen(onBack = { developerVisible = false })
+            }
+            AnimatedVisibility(
+                visible = importTutorialVisible,
+                enter = fadeIn(tween(Motion.TabCrossfadeMs)) + slideInHorizontally(
+                    tween(Motion.ScrimMs, easing = Motion.EmphasizedDecelerate),
+                    initialOffsetX = { it / 10 }
+                ),
+                exit = fadeOut(tween(Motion.TabCrossfadeMs)) + slideOutHorizontally(
+                    tween(Motion.TabCrossfadeMs, easing = Motion.EmphasizedDecelerate),
+                    targetOffsetX = { it / 10 }
+                )
+            ) {
+                ImportTutorialScreen(
+                    onBack = { importTutorialVisible = false },
+                    onStartImport = { importTutorialVisible = false; schoolSyncVisible = true }
+                )
             }
             AnimatedVisibility(
                 visible = schoolSyncVisible,

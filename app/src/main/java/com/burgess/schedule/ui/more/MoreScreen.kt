@@ -7,6 +7,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -335,10 +337,11 @@ internal fun MoreScreen(
     onDeveloperClick: () -> Unit,
     onSchoolSyncClick: () -> Unit = {},
     onSchoolSyncDiagnosticsClick: () -> Unit = {},
-    onBackupClick: () -> Unit = {}
+    onBackupClick: () -> Unit = {},
+    onImportTutorialClick: () -> Unit = {}
 ) {
     Column(
-        Modifier.fillMaxSize().padding(AppSpace.page),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(AppSpace.page),
         verticalArrangement = Arrangement.spacedBy(AppSpace.gap)
     ) {
         Text("更多", style = AppType.title, color = Ink)
@@ -349,6 +352,8 @@ internal fun MoreScreen(
             ListRow("备份与恢复", "导出或恢复本地课程表", onBackupClick, icon = R.drawable.symbol_content_copy)
             HorizontalDivider(color = Hairline)
             ListRow("学校课表同步", "从企业微信教务系统导入课程", onSchoolSyncClick, icon = R.drawable.symbol_history)
+            HorizontalDivider(color = Hairline)
+            ListRow("课表导入教程", "首次导入的操作步骤与常见问题", onImportTutorialClick, icon = R.drawable.symbol_history)
         }
         SectionLabel("关于")
         ListGroup {
@@ -362,7 +367,7 @@ internal fun MoreScreen(
                 ListRow("学校同步诊断", "连接与采集问题排查", onSchoolSyncDiagnosticsClick)
             }
         }
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(AppSpace.group))
         Text("课程表 ${BuildConfig.VERSION_NAME} · 数据仅保存在本机", Modifier.fillMaxWidth(), style = AppType.caption, color = MutedInk, textAlign = TextAlign.Center)
     }
 }
