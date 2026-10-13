@@ -28,3 +28,7 @@ hs_err_pid*
 # Local device credentials and animation review recordings
 /.adb-user/
 /video_review/
+
+# Local archived development artifacts and final release packages
+/local/
+/dist/
